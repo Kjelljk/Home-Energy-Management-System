@@ -1,0 +1,22 @@
+{
+  "domain": "power_controller",
+  "name": "Power Controller",
+  "codeowners": [
+    "@kjelljk"
+  ],
+  "config_flow": true,
+  "dependencies": [
+    "frontend",
+    "http",
+    "panel_custom",
+    "websocket_api"
+  ],
+  "documentation": "https://github.com/kjelljk/power_controller",
+  "integration_type": "hub",
+  "iot_class": "local_polling",
+  "requirements": [
+    "numpy>=1.24.0",
+    "scipy>=1.11.0"
+  ],
+  "version": "2.6.0"
+}

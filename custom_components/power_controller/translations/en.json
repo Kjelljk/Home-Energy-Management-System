@@ -1,0 +1,251 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Power Controller Setup",
+        "description": "Configure the central Power Controller sensors or select a new controllable object or thermal zone to add.",
+        "data": {
+          "active_power_sensor": "Grid Active Power Sensor [kW/W]",
+          "monthly_energy_sensor": "Grid Energy Import Meter [kWh]",
+          "current_l1_sensor": "Current Phase L1 [A]",
+          "current_l2_sensor": "Current Phase L2 [A]",
+          "current_l3_sensor": "Current Phase L3 [A]",
+          "nordpool_sensor": "Nordpool Spot Price Sensor",
+          "workday_sensor": "Workday Binary Sensor",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
+          "weather_entity": "Weather Forecast Entity",
+          "external_limit_sensor": "External Shared Grid Limiter [A]",
+          "sensor_timeout_s": "Sensor Stale Fallback Timeout [s]",
+          "zone_name": "Initial Thermal Zone Name",
+          "zone_area_m2": "Zone Floor Area [m²]",
+          "insulation_class": "Building Insulation Class",
+          "object_type": "Object or Zone Type",
+          "oa_delay_5_min": "Overload acceptance: time at 5 % overload [min]",
+          "oa_delay_20_min": "Overload acceptance: time at 20 % overload [min]",
+          "oa_ramp_5_min": "Ramp-down after 5 % overload [min]",
+          "oa_ramp_20_min": "Ramp-down after 20 % overload [min]",
+          "oa_recover_fast_min": "Recovery time below 80 % load [min]",
+          "oa_recover_slow_min": "Recovery time at 100 % load [min]",
+          "oa_hard_ratio": "Immediate limit at overload ratio [× rated]"
+        }
+      },
+      "thermal_zone": {
+        "title": "Add Thermal Zone",
+        "description": "Define a 1R1C thermodynamic model for a room or heating zone.",
+        "data": {
+          "zone_name": "Zone Name",
+          "zone_area_m2": "Floor Area [m²]",
+          "insulation_class": "Insulation Class",
+          "window_sensor": "Window/Door Sensor (pauses thermal learning when open)"
+        }
+      },
+      "device_details": {
+        "title": "Configure Controllable Object",
+        "description": "Enter electrical ratings, phase pair (230V IT), and control entities.",
+        "data": {
+          "name": "Object Name",
+          "target_entity": "Entity to Control",
+          "power_sensor": "Live Active Power Sensor",
+          "room_temp_sensor": "Room Temperature Sensor",
+          "water_temp_sensor": "Water Temperature Sensor",
+          "phase_pair": "230V IT Phase Pair",
+          "nominal_current_a": "Nominal Current [A]",
+          "nominal_power_kw": "Nominal Power [kW]",
+          "zone_id": "Thermodynamic Zone",
+          "heating_coefficient": "Heating Coefficient",
+          "comfort_temp_entity": "Comfort Temperature Entity",
+          "eco_temp_entity": "Minimum / Eco Temperature Entity",
+          "oot_temp_entity": "Out of Town Temperature Entity",
+          "nominal_temp_entity": "Nominal Operating Temperature Entity",
+          "min_temp_entity": "Minimum Operating Temperature Entity",
+          "schedule_entity": "Home Assistant Schedule Helper",
+          "enable_pi_governor": "Enable External Room PI Setpoint Governor",
+          "daily_quota_hours": "Daily Runtime Quota Fallback [h]",
+          "ev_min_current_a": "Minimum Charging Current [A]",
+          "ev_battery_kwh": "EV Battery Capacity [kWh]",
+          "ev_availability_switch": "Charger Availability Switch",
+          "ev_charge_switch": "Charge Control Switch",
+          "ev_transaction_sensor": "OCPP Transaction ID Sensor",
+          "ev_connected_sensor": "EV Connected Binary Sensor",
+          "ev_soc_sensor": "EV Battery SoC Sensor [%]",
+          "ev_conn_id": "OCPP Connector ID",
+          "comfort_during": "Comfort temperature during"
+        }
+      }
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Power Controller",
+        "description": "Choose what to edit.",
+        "menu_options": {
+          "hub_settings": "Sensors and general settings",
+          "occupancy": "Home office weekdays",
+          "grid_tariff": "Grid tariff"
+        },
+        "data": {
+          "name": "Object Name",
+          "target_entity": "Entity to Control",
+          "power_sensor": "Live Active Power Sensor",
+          "room_temp_sensor": "Room Temperature Sensor",
+          "water_temp_sensor": "Water Temperature Sensor",
+          "phase_pair": "230V IT Phase Pair",
+          "nominal_current_a": "Nominal Current [A]",
+          "nominal_power_kw": "Nominal Power [kW]",
+          "zone_id": "Thermodynamic Zone",
+          "heating_coefficient": "Heating Coefficient",
+          "comfort_temp_entity": "Comfort Temperature Entity",
+          "eco_temp_entity": "Minimum / Eco Temperature Entity",
+          "oot_temp_entity": "Out of Town Temperature Entity",
+          "nominal_temp_entity": "Nominal Operating Temperature Entity",
+          "min_temp_entity": "Minimum Operating Temperature Entity",
+          "schedule_entity": "Home Assistant Schedule Helper",
+          "enable_pi_governor": "Enable External Room PI Setpoint Governor",
+          "daily_quota_hours": "Daily Runtime Quota Fallback [h]",
+          "ev_min_current_a": "Minimum Charging Current [A]",
+          "ev_battery_kwh": "EV Battery Capacity [kWh]",
+          "ev_availability_switch": "Charger Availability Switch",
+          "ev_charge_switch": "Charge Control Switch",
+          "ev_transaction_sensor": "OCPP Transaction ID Sensor",
+          "ev_connected_sensor": "EV Connected Binary Sensor",
+          "ev_soc_sensor": "EV Battery SoC Sensor [%]",
+          "ev_conn_id": "OCPP Connector ID",
+          "zone_name": "Zone Name",
+          "zone_area_m2": "Floor Area [m²]",
+          "insulation_class": "Insulation Class",
+          "window_sensor": "Window/Door Sensor (pauses thermal learning when open)",
+          "comfort_during": "Comfort temperature during"
+        }
+      },
+      "hub_settings": {
+        "title": "Sensors and general settings",
+        "data": {
+          "active_power_sensor": "Grid Active Power Sensor [kW/W]",
+          "monthly_energy_sensor": "Grid Energy Import Meter [kWh]",
+          "current_l1_sensor": "Current Phase L1 [A]",
+          "current_l2_sensor": "Current Phase L2 [A]",
+          "current_l3_sensor": "Current Phase L3 [A]",
+          "nordpool_sensor": "Nordpool Spot Price Sensor",
+          "workday_sensor": "Workday Binary Sensor",
+          "outdoor_temp_sensor": "Outdoor Temperature Sensor",
+          "weather_entity": "Weather Forecast Entity",
+          "external_limit_sensor": "External Shared Grid Limiter [A]",
+          "sensor_timeout_s": "Sensor Stale Fallback Timeout [s]",
+          "zone_name": "Initial Thermal Zone Name",
+          "zone_area_m2": "Zone Floor Area [m²]",
+          "insulation_class": "Building Insulation Class",
+          "object_type": "Object or Zone Type",
+          "oa_delay_5_min": "Overload acceptance: time at 5 % overload [min]",
+          "oa_delay_20_min": "Overload acceptance: time at 20 % overload [min]",
+          "oa_ramp_5_min": "Ramp-down after 5 % overload [min]",
+          "oa_ramp_20_min": "Ramp-down after 20 % overload [min]",
+          "oa_recover_fast_min": "Recovery time below 80 % load [min]",
+          "oa_recover_slow_min": "Recovery time at 100 % load [min]",
+          "oa_hard_ratio": "Immediate limit at overload ratio [× rated]"
+        }
+      },
+      "grid_tariff": {
+        "title": "Grid tariff",
+        "description": "Price list versions (the version valid on a date is used automatically):\n{versions}\n\nChanges are only stored when you choose **Save and close**.",
+        "menu_options": {
+          "tariff_pick_version": "Edit a price list version",
+          "tariff_new_version": "New price list version (e.g. next year)",
+          "tariff_save": "Save and close"
+        }
+      },
+      "tariff_pick_version": {
+        "title": "Choose version",
+        "data": {
+          "version": "Price list version"
+        }
+      },
+      "tariff_new_version": {
+        "title": "New price list version",
+        "description": "Typically created when the grid operator publishes next year's prices. Start from a copy of an existing version or a template.",
+        "data": {
+          "name": "Name",
+          "valid_from": "Valid from",
+          "based_on": "Start from"
+        }
+      },
+      "tariff_version": {
+        "title": "Price list version",
+        "description": "{summary}",
+        "menu_options": {
+          "tariff_general": "Name, date, default price, fees, VAT, holidays",
+          "tariff_pick_period": "Edit a price period",
+          "tariff_add_period": "Add a price period",
+          "tariff_capacity": "Capacity steps",
+          "tariff_delete_version": "Delete this version",
+          "grid_tariff": "Back"
+        }
+      },
+      "tariff_general": {
+        "title": "General",
+        "description": "Default price applies to all hours not covered by a period. Enter prices exactly as in the price list and tick whether they include VAT.",
+        "data": {
+          "name": "Name",
+          "valid_from": "Valid from",
+          "prices_include_vat": "Prices in this version include VAT",
+          "default_price": "Default energy charge (all other hours)",
+          "energy_fee": "Consumption tax + Enova fee per kWh",
+          "holidays_as": "Public holidays"
+        }
+      },
+      "tariff_pick_period": {
+        "title": "Choose period",
+        "description": "Periods are checked from the top; the first match decides the price.",
+        "data": {
+          "period": "Period"
+        }
+      },
+      "tariff_period": {
+        "title": "Price period",
+        "description": "Hours: from (inclusive) to (exclusive). 22 → 6 crosses midnight; 0 → 24 is the whole day. Leave months empty for all year. Prices {vat}.",
+        "data": {
+          "name": "Name",
+          "price": "Energy charge",
+          "days": "Days",
+          "start_hour": "From hour",
+          "end_hour": "To hour",
+          "months": "Months (empty = all)",
+          "position": "Order (1 = checked first)",
+          "delete": "Delete this period"
+        }
+      },
+      "tariff_capacity": {
+        "title": "Capacity steps",
+        "description": "One line per step: upper limit in kW = price per month. Use 'over' for the last open step. Example:\n2 = 124\n5 = 200\nover = 5520",
+        "data": {
+          "steps": "Steps",
+          "threshold_in_next_step": "Exactly on the limit counts in the next step"
+        }
+      },
+      "tariff_delete_version": {
+        "title": "Delete version",
+        "description": "Delete price list version '{name}'?",
+        "data": {
+          "confirm": "Yes, delete"
+        }
+      },
+      "occupancy": {
+        "title": "Home office weekdays",
+        "description": "Weekdays you normally work from home. Rooms set to 'Home office hours' are heated during work hours on these days. Wake/leave/return/bedtimes are adjusted with the time entities on the Power Controller device; single days with the 'Home Office Today/Tomorrow' switches or the set_home_office service.",
+        "data": {
+          "home_office_weekdays": "Recurring home-office weekdays"
+        }
+      }
+    },
+    "error": {
+      "duplicate_date": "Another version already starts on this date",
+      "no_days": "Choose at least one day",
+      "invalid_hours": "Hours must be 0–23 (from) and 0–24 (to)",
+      "invalid_steps": "Could not read the steps. Use 'kW = kr' per line, no duplicates",
+      "last_version": "The last version cannot be deleted"
+    },
+    "abort": {
+      "hub_not_loaded": "Power Controller is not running – try again in a moment"
+    }
+  }
+}

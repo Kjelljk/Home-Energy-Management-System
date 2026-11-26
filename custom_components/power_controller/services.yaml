@@ -1,0 +1,55 @@
+set_priorities:
+  name: Set Device Priorities
+  description: Atomically reorder planning and/or distribution priorities (1 = highest) from a drag-and-drop list.
+  fields:
+    ordered_entry_ids:
+      name: Ordered Entry IDs
+      description: List of Power Controller device config entry IDs ordered from highest priority (1) to lowest.
+      required: false
+      example:
+        - "01JABC123BATHROOM"
+        - "01JABC456HOTWATER"
+        - "01JABC789EVCHARGER"
+      selector:
+        object:
+    target:
+      name: Priority Target
+      description: Which priority list to update.
+      default: "both"
+      selector:
+        select:
+          options:
+            - "plan"
+            - "distribution"
+            - "both"
+
+recalculate_plan:
+  name: Recalculate Energy Plan
+  description: Immediately run the 72-hour energy optimisation planner (LP).
+
+reset_shadow_evaluation:
+  name: Reset Shadow Evaluation
+  description: Restart the running month's Norgespris vs. spot comparison (archived months are kept).
+
+set_home_office:
+  name: Set Home Office Day(s)
+  description: Mark one or more days as home-office days (or cancel them). Rooms with "home office" comfort are heated during work hours.
+  fields:
+    date:
+      name: Date
+      description: First day. Defaults to tomorrow.
+      selector:
+        date:
+    days:
+      name: Number of days
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 31
+    enabled:
+      name: Home office
+      description: On = home office, Off = cancel (e.g. skip a recurring home-office weekday).
+      default: true
+      selector:
+        boolean:

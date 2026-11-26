@@ -1,0 +1,21 @@
+# Example: Power Controller object cards in an everyday dashboard (sections view).
+# Replace the entity IDs with your own pc_<device>_plan sensors.
+type: sections
+title: Home
+sections:
+  - type: grid
+    cards:
+      - type: heading
+        heading: Heating and energy
+      - type: custom:power-controller-object-card
+        entity: sensor.pc_heat_pump_plan
+      - type: custom:power-controller-object-card
+        entity: sensor.pc_varmtvannstank_plan
+      - type: custom:power-controller-object-card
+        entity: sensor.pc_varmekabel_golv_plan
+      - type: custom:power-controller-object-card
+        entity: sensor.pc_varmekabel_tilforsel_plan
+        show_plan: false            # compact: status line + controls only
+      - type: custom:power-controller-object-card
+        entity: sensor.pc_elbillader_plan
+        name: Elbil
