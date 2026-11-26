@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo/logo.svg" width="160" alt="Power Controller logo"></p>
+
 # Power Controller (Home Assistant)
 
 > ⚠️ **Work in progress – not yet tested in a real Home Assistant instance.**

@@ -1,5 +1,16 @@
 # Changelog
 
+## 2.6.1
+
+### Validation fixes (hassfest / HACS)
+- Translations: `EV Battery SoC Sensor [%]` → `(%)` (hassfest read `[%` as a combined
+  translation) and the `{name}` placeholder in the delete-version text is no longer in quotes.
+- `manifest.json`: correct repository links (`documentation`, new `issue_tracker`), codeowner
+  `@Kjelljk`, version 2.6.1.
+- Repository link in the object card's card-picker entry updated.
+- Brand icon added: `custom_components/power_controller/brand/icon.png` (256 px) and
+  `icon@2x.png` (512 px). Logo as SVG in `docs/logo/` (with background, transparent, square).
+
 ## 2.6.0 (draft)
 
 ### Object card for everyday dashboards (new)

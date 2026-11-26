@@ -6,7 +6,7 @@
  * Data: websocket "power_controller/overview" every 10 s. Actions use normal services.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.6.0";
+const PCP_VERSION = "2.6.1";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
   running: ["Running", "ok"], lent: ["Idle · lent", "info"], waiting: ["Waiting", "mut"], blocked: ["Blocked", "warn"],

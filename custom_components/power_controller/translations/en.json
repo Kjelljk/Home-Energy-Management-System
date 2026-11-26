@@ -67,7 +67,7 @@
           "ev_charge_switch": "Charge Control Switch",
           "ev_transaction_sensor": "OCPP Transaction ID Sensor",
           "ev_connected_sensor": "EV Connected Binary Sensor",
-          "ev_soc_sensor": "EV Battery SoC Sensor [%]",
+          "ev_soc_sensor": "EV Battery SoC Sensor (%)",
           "ev_conn_id": "OCPP Connector ID",
           "comfort_during": "Comfort temperature during"
         }
@@ -109,7 +109,7 @@
           "ev_charge_switch": "Charge Control Switch",
           "ev_transaction_sensor": "OCPP Transaction ID Sensor",
           "ev_connected_sensor": "EV Connected Binary Sensor",
-          "ev_soc_sensor": "EV Battery SoC Sensor [%]",
+          "ev_soc_sensor": "EV Battery SoC Sensor (%)",
           "ev_conn_id": "OCPP Connector ID",
           "zone_name": "Zone Name",
           "zone_area_m2": "Floor Area [m²]",
@@ -224,7 +224,7 @@
       },
       "tariff_delete_version": {
         "title": "Delete version",
-        "description": "Delete price list version '{name}'?",
+        "description": "Delete price list version {name}?",
         "data": {
           "confirm": "Yes, delete"
         }

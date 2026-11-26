@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.6.0";
+const PC_CARD_VERSION = "2.6.1";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -491,7 +491,7 @@ if (!customElements.get("power-controller-object-card")) {
     name: "Power Controller object",
     description: "Controls one Power Controller device: committed/uncommitted, distribution status, 24 h plan and targets.",
     preview: true,
-    documentationURL: "https://github.com/kjelljk/power_controller",
+    documentationURL: "https://github.com/Kjelljk/Home-Energy-Management-System",
   });
   console.info(`%c POWER-CONTROLLER-OBJECT-CARD %c ${PC_CARD_VERSION} `, "background:#03a9f4;color:#fff", "");
 }

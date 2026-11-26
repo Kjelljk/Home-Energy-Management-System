@@ -4,7 +4,7 @@
 without the earlier conversation. Read this first, then `README.md` (features) and
 `CHANGELOG.md` (per version).
 
-**Current version:** 2.6.0 (draft). **Status:**
+**Current version:** 2.6.1. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
 - Pure-Python engines: unit-tested (66 tests pass, ~5 s).
 - HA layer: syntax/undefined-name checked; options flow and the card contract/panel feed are
   exercised with HA stubs. **Never run in a real Home Assistant instance yet.**
@@ -26,7 +26,7 @@ without the earlier conversation. Read this first, then `README.md` (features) a
 1. v1 spec by the owner → Gemini v2.1 spec + first code (MILP, untested, many critical bugs).
 2. 2.2 rewrite (LP planner, editable grid tariff, persistence, robustness) → 2.3 overload
    acceptance + English only → 2.4 shadow evaluation (Norgespris vs. spot) → 2.5 occupancy and
-   home office → 2.6 object card, overview panel, plan-index bug fix.
+   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon.
 
 ---
 
@@ -123,7 +123,7 @@ node --check custom_components/power_controller/www/*.js
 - Per change: update `CHANGELOG.md`, bump `manifest.json` **and** `const.VERSION` (cache busting),
   keep `strings.json` and `translations/en.json` identical.
 - CI: `.github/workflows/validate.yml` (pytest, hassfest, HACS).
-- Before the first push: check `codeowners`/`documentation` in `manifest.json`.
+- CI status after 2.6.1: tests pass; hassfest and HACS issues fixed (description, topics and MIT license are set on GitHub). Brand icon in `custom_components/power_controller/brand/`, logo SVGs in `docs/logo/`.
 
 ---
 
