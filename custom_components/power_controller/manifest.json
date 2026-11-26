@@ -1,22 +1,13 @@
 {
   "domain": "power_controller",
   "name": "Power Controller",
-  "codeowners": [
-    "@kjelljk"
-  ],
+  "codeowners": ["@Kjelljk"],
   "config_flow": true,
-  "dependencies": [
-    "frontend",
-    "http",
-    "panel_custom",
-    "websocket_api"
-  ],
-  "documentation": "https://github.com/kjelljk/power_controller",
+  "dependencies": ["frontend", "http", "panel_custom", "websocket_api"],
+  "documentation": "https://github.com/Kjelljk/Home-Energy-Management-System",
   "integration_type": "hub",
   "iot_class": "local_polling",
-  "requirements": [
-    "numpy>=1.24.0",
-    "scipy>=1.11.0"
-  ],
+  "issue_tracker": "https://github.com/Kjelljk/Home-Energy-Management-System/issues",
+  "requirements": ["numpy>=1.24.0", "scipy>=1.11.0"],
   "version": "2.6.0"
 }
