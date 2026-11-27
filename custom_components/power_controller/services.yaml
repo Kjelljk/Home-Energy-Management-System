@@ -53,3 +53,40 @@ set_home_office:
       default: true
       selector:
         boolean:
+
+thermal_model:
+  name: Thermal Model
+  description: Reset, set manually, freeze or unfreeze the learned thermal model of a zone.
+  fields:
+    zone_id:
+      name: Zone ID
+      required: true
+      selector:
+        text:
+    action:
+      name: Action
+      required: true
+      selector:
+        select:
+          options: ["reset", "set", "freeze", "unfreeze"]
+    heat_capacity_kwh_per_c:
+      name: Heat capacity (kWh per °C)
+      description: Heat needed to raise the zone 1 °C (used with action "set").
+      selector:
+        number:
+          min: 0.05
+          max: 100
+          step: 0.05
+    heat_loss_w_per_c:
+      name: Heat loss (W per °C)
+      description: Heat lost per °C difference between indoor and outdoor (used with action "set").
+      selector:
+        number:
+          min: 0.5
+          max: 2000
+          step: 0.5
+    freeze:
+      name: Freeze learning
+      description: Keep the manual values (default on for action "set").
+      selector:
+        boolean:

@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.9.0";
+const PC_CARD_VERSION = "2.10.0";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },

@@ -4,8 +4,8 @@
 without the earlier conversation. Read this first, then `README.md` (features) and
 `CHANGELOG.md` (per version).
 
-**Current version:** 2.9.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
-- Pure-Python engines: unit-tested (81 tests pass, ~5 s).
+**Current version:** 2.10.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
+- Pure-Python engines: unit-tested (92 tests pass, ~5 s).
 - HA layer: syntax/undefined-name checked; options flow and the card contract/panel feed are
   exercised with HA stubs. **Never run in a real Home Assistant instance yet.**
 - Frontend JS: exercised in Chromium with a mock `hass` (all buttons/steppers/selects, panel tabs,
@@ -26,7 +26,7 @@ without the earlier conversation. Read this first, then `README.md` (features) a
 1. v1 spec by the owner → Gemini v2.1 spec + first code (MILP, untested, many critical bugs).
 2. 2.2 rewrite (LP planner, editable grid tariff, persistence, robustness) → 2.3 overload
    acceptance + English only → 2.4 shadow evaluation (Norgespris vs. spot) → 2.5 occupancy and
-   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts.
+   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts → 2.10.0 partial lending, calmer heat pump (30 min, PI hysteresis, hourly setpoints), thermal-model view/reset/manual, help texts, priority-stacked plan.
 
 ---
 
@@ -110,6 +110,12 @@ real-time loop); `plans_72h` / `plan_result` are the hourly view for UI, history
 12c. **Command patience**: min step + min interval; urgent (warning / OA limiting / projected over
     allowance) only for reductions. EV without deadline = delay penalty; minimum SoC deadline fixed
     per plug-in session. Heater type stepless/on_off affects distribution and live-power fallback.
+12d. **Lending:** stepless heaters lend grant − live − margin (`distributor.lendable_kw`); on/off lend all
+    when idle. Regulated heaters (PI governor) use `ControlSettings.regulated_min_interval_s` (30 min) via
+    `coordinator.command_interval_s`; PI offset hysteresis 0.75 °C; `_planned_setpoint` uses the hourly
+    max; pre-heat blocks are one step (`planner._heating_setpoints`).
+12e. **Thermal models** keep bookkeeping (seed, samples, error EMA, hourly history, frozen/manual);
+    `coordinator.thermal_zones_payload()` and service `thermal_model` (reset/set/freeze/unfreeze).
 12a. **Uncommitted devices are planned as a forecast** (flat, never shifted) and added to the
     baseload the optimiser sees. EV only when connected AND charging.
 12. **Committed card hides mode buttons** (targets only); uncommitted card = normal controls.

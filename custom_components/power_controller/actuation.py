@@ -24,6 +24,7 @@ class ControlSettings:
     """Common command-patience settings (persisted, editable as number entities)."""
 
     min_interval_s: float = 300.0       # minimum time between two commands to the same device
+    regulated_min_interval_s: float = 1800.0   # heaters regulated by an external room sensor (heat pumps)
     ev_min_delta_a: float = 2.0         # minimum change of EV charging current
     temp_min_delta_c: float = 0.5       # minimum change of a climate setpoint
     ev_delay_penalty_nok: float = 0.02  # NOK per kWh per hour of delay (EV without deadline)

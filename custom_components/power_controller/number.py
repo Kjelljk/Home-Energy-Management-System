@@ -119,6 +119,17 @@ HUB_NUMBERS: tuple[_HubNumberSpec, ...] = (
         triggers_price=False,
     ),
     _HubNumberSpec(
+        "regulated_interval",
+        "Regulated Heater Minimum Interval",
+        "min",
+        5.0,
+        120.0,
+        5.0,
+        lambda c: c.control.regulated_min_interval_s / 60.0,
+        lambda c, v: setattr(c.control, "regulated_min_interval_s", v * 60.0),
+        triggers_price=False,
+    ),
+    _HubNumberSpec(
         "ev_min_step",
         "EV Current Minimum Step",
         "A",
