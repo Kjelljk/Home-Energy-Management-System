@@ -12,8 +12,7 @@ except ImportError:
 
 DOMAIN = "power_controller"
 
-VERSION = "2.10.1"  # keep in sync with manifest.json (used for frontend cache busting)
-
+VERSION = "2.10.2"  # keep in sync with manifest.json (used for frontend cache busting)
 
 
 PLATFORMS: list[str] = [
@@ -177,6 +176,7 @@ HEATER_ON_OFF = "on_off"             # full power or nothing (panel heater, cabl
 CONF_EV_AVAILABILITY_SWITCH = "ev_availability_switch"
 CONF_EV_CHARGE_SWITCH = "ev_charge_switch"
 CONF_EV_TRANSACTION_SENSOR = "ev_transaction_sensor"
+CONF_EV_TARGET_SOC_ENTITY = "ev_target_soc_entity"   # the car's own charge limit (number/input_number)
 CONF_EV_CONNECTED_SENSOR = "ev_connected_sensor"
 CONF_EV_SOC_SENSOR = "ev_soc_sensor"
 CONF_EV_BATTERY_KWH = "ev_battery_kwh"

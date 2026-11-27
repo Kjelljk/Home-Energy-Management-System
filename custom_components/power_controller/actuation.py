@@ -94,13 +94,8 @@ def parse_transaction_id(state: str | None) -> int | None:
 
 
 def ocpp_charge_rate_data(limit_a: int, conn_id: int, transaction_id: int | None) -> dict:
-    """Service data for ``ocpp.set_charge_rate``.
-
-    With an active transaction a TxProfile (relative, stack level 0) bound to the transaction is
-    sent – the same profile the owner's working automation used; many chargers ignore a plain
-    ``limit_amps`` default profile. Without a transaction (before charging starts) ``limit_amps``
-    is used as fallback.
-    """
+    """Service data for ``ocpp.set_charge_rate``: a TxProfile bound to the active transaction
+    (as in the owner's working automation), ``limit_amps`` before a transaction exists."""
     limit_a = max(0, int(limit_a))
     conn_id = int(conn_id or 1)
     if transaction_id is None:

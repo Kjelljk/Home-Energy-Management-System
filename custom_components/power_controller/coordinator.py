@@ -44,6 +44,7 @@ from .const import (
     CONF_EV_CONN_ID,
     CONF_EV_MIN_CURRENT_A,
     CONF_EV_SOC_SENSOR,
+    CONF_EV_TARGET_SOC_ENTITY,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
     CONF_HEATING_COEFFICIENT,
@@ -213,6 +214,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_ev_target_a: dict[str, int] = {}
         self._last_ocpp_cmd_ts: dict[str, datetime] = {}
         self._last_ev_cmd_kind: dict[str, str] = {}
+        self._ev_last_action: dict[str, str] = {}
         self._last_switch_ts: dict[str, datetime] = {}
         self._last_zone_sample: dict[str, tuple[datetime, float]] = {}
         self._legionella_high_minutes: dict[str, float] = {}
@@ -499,6 +501,13 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         live = self._read_float(d.get(CONF_POWER_SENSOR), max_age_s=self._timeout())
         if live is not None:
             return max(0.0, live)
+        if d.get(CONF_DEVICE_TYPE) == DeviceType.EV_CHARGER:
+            # no power sensor: only count power while the charge switch is on, at the current
+            # that was actually commanded (never the nominal power of a charger that is off)
+            sw = self.hass.states.get(d.get(CONF_EV_CHARGE_SWITCH)) if d.get(CONF_EV_CHARGE_SWITCH) else None
+            if sw is None or sw.state != "on":
+                return 0.0
+            return round(float(self._last_ev_target_a.get(entry_id, 0)) * 230.0 / 1000.0, 3)
         alloc = self.allocations.get(entry_id)
         if alloc and alloc.allowed_kw > 0 and alloc.status != DistStatus.REDISTRIBUTING:
             # without a power sensor: on/off devices are assumed at full power, stepless
@@ -928,7 +937,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             connected = bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR))) and avail is not False
             soc = self._read_float(d.get(CONF_EV_SOC_SENSOR))
             cap_kwh = float((d.get(CONF_EV_BATTERY_KWH) or 75.0))
-            tgt = self.target_soc.get(eid, 80.0)
+            tgt = self.ev_target_soc(eid)
             need = max(0.0, (tgt - (soc if soc is not None else 50.0)) / 100.0 * cap_kwh)
             min_soc = self.ev_min_soc.get(eid, 30.0)
             min_need = max(0.0, (min_soc - (soc if soc is not None else 50.0)) / 100.0 * cap_kwh)
@@ -1388,30 +1397,54 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 min_ev_a=min_a,
                 # never above what the distributor granted (= plan share or lent capacity)
                 max_ev_a=max(min_a, min(max_a, int(alloc.allowed_amps))),
+                ramp=False,   # command patience limits how often the current changes
             )
+            if 0 < target_a < min_a:
+                target_a = 0  # the charger cannot run below its minimum current
 
         charge_sw = d.get(CONF_EV_CHARGE_SWITCH)
-        can_toggle = self._can_switch(eid, now, MIN_EV_PAUSE_SECONDS)
         sw_state = self.hass.states.get(charge_sw) if charge_sw else None
+        charging_on = bool(sw_state and sw_state.state == "on")
+        pnow = self.priority_now.get(eid, False)
         if target_a == 0:
-            if sw_state and sw_state.state == "on" and (can_toggle or self.urgent_now()):
-                # stop: limit 0 A on the running transaction first, then switch charging off
+            # stop: 0 A on the running transaction first, then switch charging off
+            if charging_on and (self._can_switch(eid, now, MIN_EV_PAUSE_SECONDS) or self.urgent_now()):
                 if self._last_ev_target_a.get(eid) != 0:
                     await self._send_ev_limit(eid, d, 0, now)
                 if await self._safe_call("switch", "turn_off", {"entity_id": charge_sw}):
                     self._last_switch_ts[eid] = now
+                    self._ev_last_action[eid] = f"stop {now:%H:%M}"
             self._last_ev_target_a[eid] = 0
             return
-        if sw_state and sw_state.state == "off" and can_toggle:
-            if await self._safe_call("switch", "turn_on", {"entity_id": charge_sw}):
+
+        if not charging_on:
+            # start: availability on, current limit first (default profile – no transaction yet),
+            # then the charge switch. Priority now and the first start skip the pause timer.
+            if not (pnow or self._can_switch(eid, now, MIN_EV_PAUSE_SECONDS)):
+                self._ev_last_action[eid] = "waiting for restart pause"
+                return
+            avail = d.get(CONF_EV_AVAILABILITY_SWITCH)
+            av_state = self.hass.states.get(avail) if avail else None
+            if av_state is not None and av_state.state == "off":
+                await self._safe_call("switch", "turn_on", {"entity_id": avail})
+            await self._send_ev_limit(eid, d, target_a, now)
+            if charge_sw and await self._safe_call("switch", "turn_on", {"entity_id": charge_sw}):
                 self._last_switch_ts[eid] = now
+                self._ev_last_action[eid] = f"start {target_a} A {now:%H:%M}"
+            elif not charge_sw:
+                self._ev_last_action[eid] = "no charge switch configured"
+            return
 
         prev = self._last_ev_target_a.get(eid)
         last_cmd = self._last_ocpp_cmd_ts.get(eid)
+        # a transaction appeared since the last command (charging just started): bind the
+        # current to it at once with a TxProfile
+        tx_new = self.ev_transaction_id(d) is not None and self._last_ev_cmd_kind.get(eid) != "tx_profile"
         # patient: only meaningful changes, at most every few minutes; reductions go out at
         # once only when the hour allowance or a phase is at risk (never increases)
-        if should_send_command(prev, target_a, last_cmd, now, self.control.ev_min_delta_a,
-                               self.control.min_interval_s, urgent=self.urgent_now(), lower_is_relief=True):
+        if tx_new or should_send_command(prev, target_a, last_cmd, now, self.control.ev_min_delta_a,
+                                         self.control.min_interval_s, urgent=self.urgent_now() or pnow,
+                                         lower_is_relief=True):
             await self._send_ev_limit(eid, d, target_a, now)
 
     def ev_transaction_id(self, d: dict) -> int | None:
@@ -1430,6 +1463,21 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         else:
             _LOGGER.warning("EV %s: set_charge_rate %s A was not accepted (data: %s)", eid, limit_a, data)
         return ok
+
+    # ------------------------------------------------------------------ EV target SoC
+    def ev_target_soc(self, eid: str) -> float:
+        """Charge target: the car's own target SoC entity if configured, else the PC number."""
+        d = self.device_cfg(eid)
+        ext = self._read_float(d.get(CONF_EV_TARGET_SOC_ENTITY))
+        return float(ext) if ext is not None else float(self.target_soc.get(eid, 80.0))
+
+    async def async_set_ev_target_soc(self, eid: str, value: float) -> None:
+        d = self.device_cfg(eid)
+        ext = d.get(CONF_EV_TARGET_SOC_ENTITY)
+        if ext:
+            await self._safe_call(ext.split(".", 1)[0], "set_value", {"entity_id": ext, "value": float(value)})
+        self.target_soc[eid] = float(value)
+        await self.async_settings_changed(reprice=False)
 
     async def async_release_device(self, eid: str) -> None:
         """Called when a device is set to Uncommitted: hand it back in a sane state."""
@@ -1570,21 +1618,25 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             dl_on = self.ev_deadline_enabled.get(eid, True)
             min_on = self.ev_min_soc_enabled.get(eid, True)
             min_dl = ev_min_soc_deadline(self.ev_session_start.get(eid), self.ev_min_since.get(eid)) if min_on else None
-            entities.update(target_soc=self.own_entity_id("number", f"{eid}_target_soc"),
+            entities.update(target_soc=d.get(CONF_EV_TARGET_SOC_ENTITY) or self.own_entity_id("number", f"{eid}_target_soc"),
                             finish_by=self.own_entity_id("datetime", f"{eid}_finish_by"),
                             deadline_enabled=self.own_entity_id("switch", f"{eid}_deadline_enabled"),
                             min_soc_enabled=self.own_entity_id("switch", f"{eid}_min_soc_enabled"),
                             min_soc=self.own_entity_id("number", f"{eid}_min_soc"),
                             soc=d.get(CONF_EV_SOC_SENSOR), connected=d.get(CONF_EV_CONNECTED_SENSOR))
-            extra = {"soc": cfg_value(CONF_EV_SOC_SENSOR), "target_soc": self.target_soc.get(eid, 80.0),
+            extra = {"soc": cfg_value(CONF_EV_SOC_SENSOR), "target_soc": self.ev_target_soc(eid),
+                     "target_soc_source": "car" if d.get(CONF_EV_TARGET_SOC_ENTITY) else "power_controller",
+                     "transaction_id": self.ev_transaction_id(d),
+                     "last_command_kind": self._last_ev_cmd_kind.get(eid),
+                     "last_action": self._ev_last_action.get(eid),
+                     "charge_switch_on": bool(d.get(CONF_EV_CHARGE_SWITCH) and self.hass.states.get(d.get(CONF_EV_CHARGE_SWITCH))
+                                              and self.hass.states.get(d.get(CONF_EV_CHARGE_SWITCH)).state == "on"),
                      "finish_by": fin.isoformat() if (fin and dl_on) else None,
                      "deadline_enabled": dl_on,
                      "min_soc_enabled": min_on, "min_soc": self.ev_min_soc.get(eid, 30.0),
                      "min_soc_deadline": min_dl.isoformat() if min_dl else None,
                      "min_soc_unmet_kwh": self.plan_result.ev_min_unmet.get(eid),
                      "session_start": self.ev_session_start.get(eid).isoformat() if self.ev_session_start.get(eid) else None,
-                     "transaction_id": self.ev_transaction_id(d),
-                     "last_command_kind": self._last_ev_cmd_kind.get(eid),
                      "connected": bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)))}
         elif dtype == DeviceType.SWITCH:
             entities.update(runtime_hours=self.own_entity_id("number", f"{eid}_runtime_hours"))

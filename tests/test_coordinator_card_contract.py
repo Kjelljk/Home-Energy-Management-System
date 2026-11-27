@@ -201,3 +201,53 @@ def test_regulated_heater_gets_long_command_interval(coordinator):
     coordinator.device_entries["HP"].data["enable_pi_governor"] = True
     assert coordinator.command_interval_s("HP") == 1800.0
     assert coordinator.command_interval_s("EV") == 300.0
+
+
+def test_ev_start_sequence_priority_now(coordinator):
+    """Priority now: limit first (limit_amps, no transaction yet), then the charge switch on;
+    never a current below the minimum; live power 0 while the charge switch is off."""
+    import asyncio
+    from custom_components.power_controller.const import DeviceAllocation, DistStatus
+
+    calls = []
+
+    class Services:
+        def has_service(self, d, s):
+            return True
+
+        async def async_call(self, d, s, data, blocking=False, return_response=False):
+            calls.append((d, s, data))
+
+    st = {}
+    old_get = coordinator.hass.states.get
+    coordinator.hass.states = type("S", (), {"get": staticmethod(lambda e: st.get(e) or old_get(e))})()
+    coordinator.hass.services = Services()
+    coordinator.hass.async_create_task = lambda c: c.close()
+    coordinator.schedule_save = lambda: None
+
+    class _St:
+        def __init__(self, s): self.state, self.attributes = s, {}
+    st["switch.charge"] = _St("off")
+    st["sensor.tx"] = _St("unknown")
+    st["input_number.car_target"] = _St("70")
+    entry = coordinator.device_entries["EV"]
+    entry.data.update(ev_charge_switch="switch.charge", ev_transaction_sensor="sensor.tx",
+                      ev_min_current_a=6, nominal_current_a=32, ev_target_soc_entity="input_number.car_target")
+    assert coordinator.get_device_live_power_kw("EV") == 0.0          # off -> no phantom 5 kW
+    assert coordinator.ev_target_soc("EV") == 70.0                     # car's own target
+    coordinator.priority_now["EV"] = True
+    coordinator.allocations["EV"] = DeviceAllocation("EV", 4.6, 20.0, DistStatus.PRIORITIZED)
+    limits = {"L1": 32.0, "L2": 32.0, "L3": 32.0}
+    coordinator.phase_currents = {"L1": 3.0, "L2": 3.0, "L3": 3.0}
+    coordinator._last_ev_target_a["EV"] = 0
+    asyncio.run(coordinator._actuate_ev_charger(NOW, "EV", coordinator.device_cfg("EV"), limits, 10.0))
+    assert calls[0][1] == "set_charge_rate" and calls[0][2]["limit_amps"] >= 6
+    assert calls[1] == ("switch", "turn_on", {"entity_id": "switch.charge"})
+    # charging started, transaction appears -> TxProfile bound to it at once
+    calls.clear()
+    st["switch.charge"] = _St("on")
+    st["sensor.tx"] = _St("812")
+    asyncio.run(coordinator._actuate_ev_charger(NOW, "EV", coordinator.device_cfg("EV"), limits, 10.0))
+    prof = __import__("json").loads(calls[0][2]["custom_profile"])
+    assert prof["transactionId"] == 812 and prof["chargingSchedule"]["chargingSchedulePeriod"][0]["limit"] >= 6
+    assert coordinator.device_attributes("EV")["target_soc_source"] == "car"

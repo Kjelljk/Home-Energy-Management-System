@@ -1,27 +1,34 @@
 # Changelog
 
-## 2.10.1
+## 2.10.2
 
-### EV charger (OCPP)
-- Charging current is now sent as a **TxProfile on the active transaction** (`ocpp.set_charge_rate`
-  with `custom_profile`: transactionId from the transaction sensor, chargingProfileId 1, stackLevel 0,
-  Relative, limit in A) – the same profile as the owner's working automation. Many chargers ignore
-  the plain `limit_amps` default profile, which is why charging did not follow the plan.
-- Before a transaction exists (sensor empty/unknown/0) `limit_amps` is used as fallback.
-- Stop = limit 0 A on the transaction, then the charge switch off.
-- Failed commands are logged with the exact service data. The EV plan sensor shows
-  `transaction_id` and `last_command_kind` (tx_profile / limit_amps).
+### EV charger: start/stop fixed
+- **Bug fix:** after a stop the next start ramped from 0 A in 2 A steps, so the first command was
+  2 A – below the minimum current – and the charger never started. A start now always begins at
+  least at the minimum current, and the charging current goes straight to the granted value
+  (command patience limits how often it changes; the slow ramp is no longer used).
+- Start sequence: availability switch on (if configured and off) → current limit (`limit_amps`, no
+  transaction yet) → charge switch on. *Priority now* skips the restart pause.
+- As soon as a transaction id appears, the current is re-sent at once as a TxProfile on it.
+- Stop: 0 A on the transaction, then charge switch off.
+- Without a power sensor the EV's live power is 0 while the charge switch is off (it showed the
+  nominal power, e.g. "5.00 / 5.0 kW", although nothing was charging).
+- The card shows the last EV action (start / stop / waiting for restart pause).
 
-### Settings dialog for devices
-- EV form: transaction sensor, availability switch, power sensor and SoC sensor are optional;
-  numeric fields use the stored value only if it is a valid number (a cleared/None value could
-  break the form). Verified by serialising the form with the same library Home Assistant uses.
-- Numeric EV settings that were stored empty no longer break the control loop.
-- If a device's settings dialog cannot be opened, the reason is shown in the dialog and the full
-  traceback is written to the Home Assistant log instead of "Unknown error".
+### EV: the car's own target SoC
+- New optional field *Car's target SoC* (number / input_number). When set, it is the charge target
+  for the plan, the card's +/- buttons change it (label "Car target"), and the Power Controller
+  *Target SoC* number mirrors it.
+
+### Includes 2.10.1
+- OCPP current as a TxProfile on the active transaction (as the owner's automation), `limit_amps`
+  fallback before a transaction exists.
+- EV settings form: optional transaction/availability/power/SoC fields, robust numeric defaults;
+  the settings dialog shows the real error instead of "Unknown error".
 
 ### Tests
-- 3 new tests (95 total): transaction id parsing, TxProfile content, fallback and stop.
+- 5 new tests (97 total): TxProfile, transaction id, start never below minimum, full start
+  sequence with Priority now (limit → switch → TxProfile), car target SoC.
 
 ## 2.10.0
 

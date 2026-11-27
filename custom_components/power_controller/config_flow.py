@@ -28,6 +28,7 @@ from .const import (
     CONF_EV_CONN_ID,
     CONF_EV_MIN_CURRENT_A,
     CONF_EV_SOC_SENSOR,
+    CONF_EV_TARGET_SOC_ENTITY,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
     CONF_HEATER_KIND,
@@ -102,8 +103,7 @@ def _opt(key: str, d: dict[str, Any]) -> vol.Optional:
 
 
 def _dv(d: dict[str, Any], key: str, default: Any, typ: type) -> Any:
-    """Default value for a numeric field: the stored value if it is a valid number, else the
-    default (stored ``None`` from a cleared field or a wrong type must not break the form)."""
+    """Default for a numeric field: the stored value if it is a valid number, else the default."""
     try:
         val = d.get(key)
         return default if val is None or val == "" else typ(val)
@@ -260,6 +260,9 @@ def _device_schema(
                 ),
                 _opt(CONF_EV_SOC_SENSOR, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
+                ),
+                _opt(CONF_EV_TARGET_SOC_ENTITY, d): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain=["number", "input_number"])
                 ),
                 vol.Optional(CONF_EV_CONN_ID, default=_dv(d, CONF_EV_CONN_ID, 1, int)): vol.Coerce(int),
             }
