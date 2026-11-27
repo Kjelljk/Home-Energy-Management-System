@@ -12,11 +12,11 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.10.2";
+const PC_CARD_VERSION = "2.11.0";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
-  lent: { label: "Idle · capacity lent", color: "var(--info-color, #039be5)", pulse: false },
+  lent: { label: "Idle · lending its power", color: "var(--info-color, #039be5)", pulse: false },
   waiting: { label: "Waiting", color: "var(--secondary-text-color, #9b9b9b)", pulse: false },
   blocked: { label: "Blocked", color: "var(--warning-color, #ffa600)", pulse: true },
   shedding: { label: "Shedding", color: "var(--error-color, #db4437)", pulse: true },
@@ -173,8 +173,8 @@ class PowerControllerObjectCard extends HTMLElement {
   _distDetail(a) {
     const s = a.ui_status;
     const nxt = a.next_action;
-    if (s === "running") return "planned now";
-    if (s === "lent") return `reserved ${(pcNum(a.allocated_kw) ?? 0).toFixed(1)} kW`;
+    if (s === "running") return pcNum(a.lent_kw) > 0 ? `planned now · lends ${pcNum(a.lent_kw).toFixed(1)} kW` : "planned now";
+    if (s === "lent") return `lends ${(pcNum(a.lent_kw) || pcNum(a.allocated_kw) || 0).toFixed(1)} kW to others`;
     if (s === "waiting") return nxt ? `next ${pcHHMM(new Date(nxt.start))}` : "nothing planned";
     if (s === "blocked") return "planned · waiting for capacity";
     if (s === "shedding") return "cut back to stay within limits";
@@ -187,7 +187,9 @@ class PowerControllerObjectCard extends HTMLElement {
     const key = a.committed ? (a.ui_status || "waiting") : "manual";
     const st = PC_STATUS[key] || PC_STATUS.waiting;
     const live = pcNum(a.live_kw) ?? 0, alloc = pcNum(a.allocated_kw) ?? 0, nom = Math.max(0.1, pcNum(a.nominal_kw) ?? 1);
-    const kw = key === "manual" || (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw">${live.toFixed(2)} / ${alloc.toFixed(1)} kW</span>`;
+    const kw = key === "manual"
+      ? `<span class="kw">${a.has_power_sensor === false ? "no power sensor" : `${live.toFixed(2)} kW measured`}</span>`
+      : (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw">${live.toFixed(2)} / ${alloc.toFixed(1)} kW</span>`;
     const meter = key === "manual" || alloc <= 0 ? "" :
       `<div class="meter"><i style="width:${Math.min(100, (alloc / nom) * 100)}%;background:color-mix(in srgb, ${st.color} 30%, transparent)"></i><i style="width:${Math.min(100, (live / nom) * 100)}%;background:${st.color}"></i></div>`;
     return `<div style="--s:${st.color}"><div class="dist${st.pulse ? " pulse" : ""}" role="status"><span class="d"></span><b>${st.label}</b><span class="dt">${this._distDetail({ ...a, ui_status: key })}</span>${kw}</div>${meter}</div>`;

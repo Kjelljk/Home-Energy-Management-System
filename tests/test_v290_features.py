@@ -80,20 +80,18 @@ def test_heating_steady_state_same_in_hourly_and_quarter_resolution():
 
 # ---------------------------------------------------------------- EV deadline & minimum SoC
 def test_ev_without_deadline_charges_cheap_but_soon():
-    prices = [1.0] * 72
-    prices[60] = 0.95                      # marginally cheaper far away
+    """2.11.0: waiting is free within 24 h; only waiting beyond 24 h costs (2 øre/kWh/h)."""
     p = EnergyPlanner()
-    plan = p.optimize_72h(NOW, GridMode.HOME, prices, [0.0] * 72, [0.5] * 72, 10.0, 63.0, [_ev(energy_needed_kwh=7.0)],
-                          ev_delay_penalty=0.02)
-    assert sum(plan["ev"][:3]) == pytest.approx(7.0, abs=0.05)     # 2.5 days later is not worth 5 øre
-    prices[20] = 0.20                      # 0.80 NOK cheaper in 20 h; delay costs 20 × 0.02 = 0.40
-    plan = p.optimize_72h(NOW, GridMode.HOME, prices, [0.0] * 72, [0.5] * 72, 10.0, 63.0, [_ev(energy_needed_kwh=7.0)],
-                          ev_delay_penalty=0.02)
-    assert plan["ev"][20] > 6.0
-    prices[20], prices[60] = 1.0, 0.20     # same saving 60 h away costs 1.20 in delay -> not worth it
-    plan = p.optimize_72h(NOW, GridMode.HOME, prices, [0.0] * 72, [0.5] * 72, 10.0, 63.0, [_ev(energy_needed_kwh=7.0)],
-                          ev_delay_penalty=0.02)
-    assert plan["ev"][60] == 0.0
+    run = lambda prices: p.optimize_72h(NOW, GridMode.HOME, prices, [0.0] * 72, [0.5] * 72, 10.0, 63.0,  # noqa: E731
+                                        [_ev(energy_needed_kwh=7.0)], ev_delay_penalty=0.02)
+    prices = [1.0] * 72
+    prices[14] = 0.98                      # 2 øre cheaper 14 h away (e.g. tonight) -> wait for it
+    assert run(prices)["ev"][14] > 6.0
+    prices = [1.0] * 72
+    prices[40] = 0.95                      # 5 øre cheaper 40 h away: waiting 16 h beyond 24 h costs 32 øre
+    assert sum(run(prices)["ev"][:3]) == pytest.approx(7.0, abs=0.05)
+    prices[40] = 0.20                      # 80 øre cheaper -> worth waiting
+    assert run(prices)["ev"][40] > 6.0
 
 
 def test_ev_minimum_soc_reached_before_fixed_deadline():

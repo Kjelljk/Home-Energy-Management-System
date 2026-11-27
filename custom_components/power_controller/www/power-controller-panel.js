@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.10.2";
+const PCP_VERSION = "2.11.0";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
@@ -58,7 +58,7 @@ const PCP_HELP = {
   regulated_interval: "Minimum time between setpoint changes for heaters regulated by an external room sensor (typically heat pumps). Longer than for other devices to avoid wearing the compressor with frequent up/down changes. Urgent reductions still go out at once.",
   ev_min_step: "The EV charging current is only changed when the new value differs by at least this many amperes (start/stop always allowed).",
   setpoint_min_step: "A climate setpoint is only changed when the new value differs by at least this many degrees.",
-  ev_delay_penalty: "For EVs without a deadline: a small cost per kWh per hour of waiting, so charging is not postponed for days to save a few øre. 2 øre/kWh/h means waiting 10 h must save more than 20 øre/kWh.",
+  ev_delay_penalty: "For EVs without a deadline. Waiting is free for the first 24 hours (the cheapest hours tonight/tomorrow are simply used). Only waiting beyond 24 h costs this much per kWh and hour, so charging is not postponed for days to save a few øre. 2 øre/kWh/h: waiting 10 h beyond 24 h must save more than 20 øre/kWh.",
 };
 const PCP_OPT_HELP = {
   price_model: {
@@ -105,6 +105,9 @@ const pE = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<
 const pN = (v) => (v === null || v === undefined || v === "" || isNaN(Number(v)) ? null : Number(v));
 const pF = (v, d = 2, fb = "–") => (pN(v) === null ? fb : Number(v).toFixed(d));
 const pHH = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+/* live power text for a device: controlled = live / granted, not controlled = measured only */
+const pLive = (x) => (x.committed ? `${pF(x.live_kw)} / ${pF(x.allocated_kw)} kW`
+  : (x.has_power_sensor === false ? "no power sensor" : `${pF(x.live_kw)} kW measured`));
 const pNok = (v) => (pN(v) === null ? "–" : Math.round(v).toLocaleString("nb-NO"));
 const pDay = (d) => d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
 const pMs = (v) => (typeof v === "number" ? (v > 1e12 ? v : v * 1000) : Date.parse(v));
@@ -393,6 +396,9 @@ class PowerControllerPanel extends HTMLElement {
           <div class="setg" id="setg"></div>
           <div class="hd" style="margin:18px 0 10px"><div><h2>Thermal models</h2><div class="hint">What Power Controller has learned about each zone (room). The planner uses this to pre-heat at the right time. Values improve over days to weeks.</div></div></div>
           <div class="setg tzg" id="thz"></div>
+          <div class="hd" style="margin:18px 0 10px"><div><h2>Notifications</h2><div class="hint">Errors and early warnings to one notify service (set under Configure → Sensors and general settings). Quiet hours: only errors. The same message at most once per hour.</div></div>
+            <button type="button" class="btn" id="ntest">Send test</button></div>
+          <div class="card" id="nlog"></div>
         </section>
 
         <section id="v-dv" hidden><div class="hd"><div><h2>Devices</h2><div class="hint">The object cards for everyday dashboards (custom:power-controller-object-card)</div></div></div><div class="dcs" id="cards"></div></section>
@@ -558,10 +564,10 @@ class PowerControllerPanel extends HTMLElement {
     const pn = k.price_now || {};
     r.getElementById("kpis").innerHTML = this._kpiHtml([
       ["Grid power", pF(k.grid_power_kw), "kW", `whole house · limit now ${pF(k.limit_now_kw)} kW`, this._pct(k.grid_power_kw, k.limit_now_kw), k.grid_power_kw > k.limit_now_kw ? "var(--error-color)" : "var(--primary-color)"],
-      ["This hour", pF(k.energy_this_hour_kwh), "kWh", `projected ${pF(k.energy_projected_kwh, 1)} of ${pF(k.hour_allowance_kwh)} kWh allowed`, this._pct(k.energy_projected_kwh, k.hour_allowance_kwh), k.energy_projected_kwh > k.hour_allowance_kwh ? "var(--warning-color)" : "var(--success-color)"],
+      ["This hour", pF(k.energy_this_hour_kwh), "kWh", `projected ${pF(k.energy_projected_kwh, 1)} of ${pF(k.hour_allowance_kwh)} kWh allowed · avg 60 min ${pF(k.p_avg_60m_kw)} kW · ${k.hour_energy_source === "hour_sensor" ? "hour sensor" : "integrated grid power"}`, this._pct(k.energy_projected_kwh, k.hour_allowance_kwh), k.energy_projected_kwh > k.hour_allowance_kwh ? "var(--warning-color)" : "var(--success-color)"],
       ["Capacity step", `${lower}–${pF(k.active_step_kw, 0)}`, "kW", `top-3 average ${pF(k.top3_mean_kw)} kWh/h · ${pNok(k.capacity_charge_nok)} NOK`, this._pct(k.top3_mean_kw, k.active_step_kw), "var(--warning-color)"],
       ["Price now", pF(pn.total), "NOK/kWh", `energy ${pF(pn.energy)} + grid ${pF(pn.grid)}${pn.period ? ` (${pE(pn.period)})` : ""}`],
-      ["Month to date", pNok(k.month_cost_nok), "NOK", `${pNok(k.month_energy_kwh)} kWh (finished hours)`],
+      ["Month to date", pNok(k.month_cost_nok), "NOK", `${pNok(k.month_energy_kwh)} kWh · ${k.month_source?.source === "statistics" ? `from meter statistics${k.month_source.missing_hours ? ` (${k.month_source.missing_hours} h missing)` : ""}` : "live (no meter statistics)"}`],
       np.active ? ["Norgespris left", pNok(np.remaining_kwh), "kWh", np.projected_reach_date ? `runs out ≈ ${pDay(new Date(np.projected_reach_date))}` : `of ${pNok(np.volume_kwh)} kWh · lasts the month`, 100 - this._pct(np.used_kwh, np.volume_kwh), "var(--info-color, var(--primary-color))"]
         : ["Norgespris benefit", k.shadow_benefit_nok === null ? "Off" : `${k.shadow_benefit_nok >= 0 ? "+" : ""}${pNok(k.shadow_benefit_nok)}`, k.shadow_benefit_nok === null ? "" : "NOK", "vs. optimised spot this month"],
     ]);
@@ -662,7 +668,7 @@ class PowerControllerPanel extends HTMLElement {
       const nx = x.forecast_only ? `≈ ${plan.reduce((a, b) => a + b, 0).toFixed(1)} kWh/24 h` : n ? (n.running_now ? `now → ${pHH(new Date(n.end))}` : `${pHH(new Date(n.start))}–${pHH(new Date(n.end))}`) : "none";
       return `<div class="dev${this._focus === x.entry_id ? " sel" : ""}" role="button" tabindex="0" data-id="${x.entry_id}" aria-pressed="${this._focus === x.entry_id}">
         <span class="dn"><i class="sw" style="background:${this._color(i)}"></i> ${pE(x.name)}<small>${PCP_TYPE[x.device_type] || ""} · ${pE(x.phase_pair || "")}</small></span>
-        <span><span class="chip c-${st[1]}">${st[0]}</span></span><span class="x num">${pF(x.live_kw)} kW</span>
+        <span><span class="chip c-${st[1]}">${st[0]}</span></span><span class="x num">${x.committed ? `${pF(x.live_kw)} kW` : (x.has_power_sensor === false ? "–" : `${pF(x.live_kw)} kW`)}</span>
         <span class="x num">${nx}</span><span class="x spark" title="max ${mx.toFixed(1)} kWh/h">${sp}<em>${mx.toFixed(1)}</em></span><span class="x"><span class="prio">${x.plan_priority}</span></span></div>`;
     }).join("") || `<div class="hint" style="padding:10px">No devices yet. Add them under Settings → Devices &amp; services → Power Controller.</div>`;
     r.querySelectorAll("#devs .dev").forEach((el) => {
@@ -758,6 +764,14 @@ class PowerControllerPanel extends HTMLElement {
     const active = this.shadowRoot.activeElement;
     const typing = active && ["INPUT", "SELECT"].includes(active.tagName);
     if (!(typing && box.contains(active))) this._renderSettingFields(d, box);
+    const nl = this.shadowRoot.getElementById("nlog"), nt = d.notifications || {};
+    if (nl) {
+      nl.innerHTML = `<div class="kv"><span>Service</span><b>${pE(nt.service || "not configured")}</b><span>Active conditions</span><b>${pE((nt.active || []).join(", ") || "none")}</b></div>`
+        + ((nt.log || []).slice().reverse().map((m) => `<div class="nrow"><span class="chip c-${m.level === "error" ? "bad" : "warn"}">${pE(m.level)}</span><b>${pE(m.title.replace("Power Controller: ", ""))}</b><span class="hint">${pE(m.message)}</span><small class="hint">${pDay(new Date(m.ts))} ${pHH(new Date(m.ts))}</small></div>`).join("")
+          || `<div class="hint">No messages sent yet.</div>`);
+      const nb = this.shadowRoot.getElementById("ntest");
+      if (nb && !nb._b) { nb._b = true; nb.addEventListener("click", () => { this._call("power_controller", "test_notification", {}); this._say("Test notification sent"); }); }
+    }
     const tz = this.shadowRoot.getElementById("thz");
     if (tz && !(typing && tz.contains(active))) this._renderThermal(d, tz);
   }
@@ -957,13 +971,13 @@ class PowerControllerPanel extends HTMLElement {
     }).join("");
     r.getElementById("phchip").innerHTML = worst === "ok" ? `<span class="chip c-ok">All phases OK</span>` : worst === "accepting" ? `<span class="chip c-warn">Accepting overload</span>` : `<span class="chip c-bad">Limiting</span>`;
     // decisions
-    r.getElementById("dtab").innerHTML = `<div class="dt h"><span>Device · reason</span><span>Status</span><span class="num">Grant kW</span><span class="num">Live kW</span><span class="num">Lent kW</span></div>` +
+    r.getElementById("dtab").innerHTML = `<div class="dt h"><span>Device · reason</span><span>Status</span><span class="num">Grant kW</span><span class="num">Live kW</span><span class="num" title="Part of the grant this device does not use and lends to others">Lent out kW</span></div>` +
       d.devices.map((x, i) => {
         const st = PCP_STATUS[x.committed ? x.ui_status : "manual"] || PCP_STATUS.waiting;
         const lent = pN(x.lent_kw) ?? 0;
-        const why = x.committed ? ({ blocked: "planned, no capacity left", "not planned": "not planned this hour" }[x.dist_reason] || (x.ui_status === "lent" ? "reserved but idle → lent" : lent > 0 ? "unused part lent to others" : x.ui_status === "priority_now" ? "priority now" : "has planned power")) : "not controlled – counted as load";
+        const why = x.committed ? ({ blocked: "planned, no capacity left", "not planned": "not planned this hour" }[x.dist_reason] || (x.ui_status === "lent" ? "reserved but idle → lent" : lent > 0 ? "unused part lent to others" : x.ui_status === "priority_now" ? "priority now" : "has planned power")) : (x.has_power_sensor === false ? "not controlled – no power sensor, forecast used" : "not controlled – measured load");
         return `<div class="dt"><span><i class="sw" style="background:${this._color(i)}"></i> ${pE(x.name)}<small>${why} · #${x.dist_priority}</small></span><span><span class="chip c-${st[1]}">${st[0]}</span></span>
-          <span class="num">${pF(x.allocated_kw)}</span><span class="num">${pF(x.live_kw)}</span><span class="num${lent > 0 ? " lentv" : ""}">${lent > 0 ? pF(lent) : "–"}</span></div>`;
+          <span class="num">${x.committed ? pF(x.allocated_kw) : "–"}</span><span class="num">${x.committed || x.has_power_sensor !== false ? pF(x.live_kw) : "n/a"}</span><span class="num${lent > 0 ? " lentv" : ""}">${lent > 0 ? pF(lent) : "–"}</span></div>`;
       }).join("");
   }
 
@@ -1054,7 +1068,7 @@ class PowerControllerPanel extends HTMLElement {
     for (const b of [...chain, ...side]) bx += boxSvg(boxes[b.key], b.title, b.lines, b.c);
     devs.forEach((x) => {
       const b = boxes[x.entry_id], st = PCP_STATUS[x.committed ? x.ui_status : "manual"] || PCP_STATUS.waiting;
-      bx += boxSvg(b, x.name, [`${st[0]} · ${pF(x.live_kw)} / ${pF(x.allocated_kw)} kW`, x.committed ? `#${x.dist_priority}` : "counted as load"], this._color(x.i));
+      bx += boxSvg(b, x.name, [`${st[0]} · ${pLive(x)}`, x.committed ? `#${x.dist_priority}${pN(x.lent_kw) > 0 ? ` · lends ${pF(x.lent_kw, 1)} kW` : ""}` : "counted as load"], this._color(x.i));
     });
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("height", H);
     svg.innerHTML = `<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" style="fill:var(--secondary-text-color)"/></marker>
@@ -1266,6 +1280,8 @@ class PowerControllerPanel extends HTMLElement {
     .tf{background:color-mix(in srgb, var(--primary-text-color) 5%, transparent);border-radius:10px;padding:8px 10px;font-size:12px;color:var(--secondary-text-color)}
     .tf b{display:block;font-size:16px;color:var(--primary-text-color);margin-top:2px;font-variant-numeric:tabular-nums}.tf small{display:block;font-size:11px}
     .tzm{margin-top:8px}.tzm summary{cursor:pointer;font-size:13px;font-weight:600}.tzb{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .nrow{display:grid;grid-template-columns:auto auto 1fr auto;gap:8px;align-items:center;padding:7px 0;border-top:1px solid var(--divider-color);font-size:12.5px}
+    @media (max-width:640px){.nrow{grid-template-columns:auto 1fr}.nrow .hint{grid-column:1/-1}}
     .lg.bad{border-color:var(--warning-color);color:var(--warning-color)}.warnt{color:var(--warning-color);align-self:center}
     .dt .lentv{color:var(--info-color, var(--primary-color));font-weight:600}
     .dt{display:grid;grid-template-columns:minmax(0,1fr) auto 52px 52px 52px;gap:8px;align-items:center;padding:8px 4px;border-top:1px solid var(--divider-color);font-size:13px}

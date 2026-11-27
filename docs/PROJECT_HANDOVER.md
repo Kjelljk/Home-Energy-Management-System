@@ -4,8 +4,8 @@
 without the earlier conversation. Read this first, then `README.md` (features) and
 `CHANGELOG.md` (per version).
 
-**Current version:** 2.10.2. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
-- Pure-Python engines: unit-tested (97 tests pass, ~5 s).
+**Current version:** 2.11.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
+- Pure-Python engines: unit-tested (106 tests pass, ~5 s).
 - HA layer: syntax/undefined-name checked; options flow and the card contract/panel feed are
   exercised with HA stubs. **Never run in a real Home Assistant instance yet.**
 - Frontend JS: exercised in Chromium with a mock `hass` (all buttons/steppers/selects, panel tabs,
@@ -26,7 +26,7 @@ without the earlier conversation. Read this first, then `README.md` (features) a
 1. v1 spec by the owner → Gemini v2.1 spec + first code (MILP, untested, many critical bugs).
 2. 2.2 rewrite (LP planner, editable grid tariff, persistence, robustness) → 2.3 overload
    acceptance + English only → 2.4 shadow evaluation (Norgespris vs. spot) → 2.5 occupancy and
-   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts → 2.10.0 partial lending, calmer heat pump (30 min, PI hysteresis, hourly setpoints), thermal-model view/reset/manual, help texts, priority-stacked plan → 2.10.1/2.10.2 OCPP TxProfile on the active transaction, EV start sequence fix (never below min current), car target SoC entity.
+   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts → 2.10.0 partial lending, calmer heat pump (30 min, PI hysteresis, hourly setpoints), thermal-model view/reset/manual, help texts, priority-stacked plan → 2.10.1/2.10.2 OCPP TxProfile on the active transaction, EV start sequence fix (never below min current), car target SoC entity → 2.11.0 hourly energy rewrite (integrated grid power / hourly sensor, close-on-detect, month rebuilt from recorder statistics), no reload on config changes, notifications, EV delay only beyond 24 h.
 
 ---
 
@@ -58,6 +58,8 @@ real-time loop); `plans_72h` / `plan_result` are the hourly view for UI, history
 | `shadow.py` | Norgespris vs. spot shadow evaluation |
 | `occupancy.py` | occupancy states, home-office days, comfort masks |
 | `card_model.py` | card status mapping, next action, 24-h windows, plan index |
+| `energy_meter.py` | HourEnergyTracker (energy this hour, close-on-detect, rolling 60 min), rebuild_month from statistics |
+| `notifier.py` | notification rules: dedupe, quiet hours, snooze, actions, notify service call |
 | `actuation.py` | command patience (`should_send_command`), control settings, EV minimum-SoC deadline |
 
 ### Home Assistant layer

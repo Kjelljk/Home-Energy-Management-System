@@ -251,3 +251,48 @@ def test_ev_start_sequence_priority_now(coordinator):
     prof = __import__("json").loads(calls[0][2]["custom_profile"])
     assert prof["transactionId"] == 812 and prof["chargingSchedule"]["chargingSchedulePeriod"][0]["limit"] >= 6
     assert coordinator.device_attributes("EV")["target_soc_source"] == "car"
+
+
+def test_fast_loop_closes_hour_with_its_own_energy(coordinator):
+    """2.11.0 regression: the hour is booked with its own energy in the step that sees the
+    new hour (previously ~0 kWh, so month/top-3/Norgespris never counted)."""
+    import asyncio
+    from custom_components.power_controller import coordinator as cmod
+
+    class _St:
+        def __init__(self, s, unit="kW"):
+            self.state, self.attributes, self.last_updated = str(s), {"unit_of_measurement": unit}, NOW
+    st = {"sensor.grid": _St(3.0)}
+    old_get = coordinator.hass.states.get
+    coordinator.hass.states = type("S", (), {"get": staticmethod(lambda e: st.get(e) or old_get(e))})()
+    coordinator.hub_entry.data["active_power_sensor"] = "sensor.grid"
+    tasks = []
+    coordinator.hass.async_create_task = lambda c: tasks.append(c)
+    coordinator.hass.services = type("Sv", (), {"has_service": lambda *a: False})()
+    coordinator.schedule_save = lambda: None
+    coordinator.committed.update(HP=False, EV=False)
+    clock = {"t": NOW.replace(minute=59, second=0)}
+    real_now = cmod.dt_util.now
+    cmod.dt_util.now = lambda: clock["t"]
+    cmod.dt_util.utcnow = lambda: clock["t"]
+    try:
+        for i in range(13):                               # 11:59:00 … 12:01:00 every 10 s
+            clock["t"] = NOW.replace(minute=59, second=0) + timedelta(seconds=10 * i)
+            st["sensor.grid"].last_updated = clock["t"]
+            asyncio.run(coordinator._async_update_data())
+    finally:
+        cmod.dt_util.now = real_now
+    rollovers = [t for t in tasks if getattr(t, "__name__", "") == "_async_process_hourly_rollover"
+                 or "hourly_rollover" in repr(t)]
+    assert rollovers, "the hour was not closed"
+    closed = rollovers[0].cr_frame.f_locals["closed"]
+    assert closed.hour_start.hour == 11 and closed.kwh == pytest.approx(3.0, abs=0.01)   # start-up estimate 59 min + 1 min
+    async def _noop(*a, **k):
+        return None
+    coordinator._async_persist_state = _noop
+    coordinator.async_run_price_update = _noop
+    asyncio.run(rollovers[0])
+    assert coordinator.price_engine.monthly_energy_kwh == pytest.approx(3.0, abs=0.01)
+    assert coordinator.energy_this_hour_kwh == pytest.approx(3.0 * 60 / 3600, abs=0.005)
+    for t in tasks[1:]:
+        t.close()

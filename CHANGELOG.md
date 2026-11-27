@@ -1,5 +1,58 @@
 # Changelog
 
+## 2.11.0
+
+### Energy this hour, month to date, top-3 and Norgespris (bug fix)
+- **Cause:** "this hour" was the delta of the total import meter. HAN/AMS meters publish the
+  register about once per hour, just after the hour, and the hour was closed at :00:05 – after
+  the counter had already been reset. "This hour" therefore contained the previous hour (e.g.
+  3.64 instead of 0.59 kWh), "projected" and "limit now" were wrong, and every finished hour was
+  booked with ~0 kWh, so Month to date, the top-3 average and the Norgespris volume never counted
+  (and seemed to restart after a restart).
+- **This hour** now integrates the grid power every 10 s (like a kW→kWh utility meter that resets
+  every hour). Optional hub field *Energy this hour sensor*: your own hourly utility meter is used
+  directly (only after it has really reset in the new hour).
+- The hour is closed in the **same step** that sees the new hour, with the energy of the hour
+  that ended. A restart inside an hour continues that hour.
+- **Rebuilt from the meter's history:** at start-up and 6 minutes after every hour the month
+  (energy, cost, daily peaks, top-3, capacity step, Norgespris used/remaining) is rebuilt from the
+  recorder's hourly statistics of the total meter. Correct after every restart and self-healing.
+  The KPI shows "from meter statistics" (and missing hours) or "live".
+- *P Average 60 min* is now a true rolling 60-minute average.
+
+### Configuration changes no longer reload the integration
+- Device and zone settings are re-read and replanned in place; hub settings re-subscribe the
+  sensors and apply overload/notification settings in place. Only saving the grid tariff still
+  reloads (it rebuilds the per-period price entities).
+
+### Notifications (new)
+- Hub settings: *Notification service* (e.g. `notify.mobile_app_pixel`), quiet hours (default
+  23:00–07:00, only errors are sent). Same message at most once per hour (daily events once a day).
+- Errors: grid sensor stale (safe mode), OCPP command not accepted, planner fallback, device not
+  following its setpoint for 15 min, tomorrow's prices missing after 15:00.
+- Early warnings: the hour will exceed the step even with all controlled devices off, new capacity
+  step locked, EV will not reach its minimum/target in time, phase overload limiting, Norgespris
+  volume runs out this month.
+- Buttons in the app: *Ignore today* on every message, *Priority now* for an EV that will not make
+  it. Settings page: notification log, active conditions, *Send test* (service `test_notification`).
+- OCPP commands are now sent as blocking calls so a rejection is detected.
+
+### Plan and cards
+- EV without deadline: waiting is free for the first 24 h; the delay cost only applies to waiting
+  beyond 24 h (so tonight's cheaper hours are used even with a small price difference).
+- "Next …" on the cards uses the 15-minute plan ("next 21:30", "planned now" when the block has
+  started) – no more "Next 21:00" at 21:35.
+- Devices that are not controlled show only measured power ("0.75 kW measured" / "no power
+  sensor") instead of "0.00 / 0.00 kW".
+- "Lent" renamed to "Lent out" (power a device does not use and gives to others); a running
+  stepless device shows "lends x kW".
+
+### Tests
+- 9 new tests (106 total): integrated hour and closing, the meter-after-the-hour bug scenario,
+  hourly sensor reset handling, restart inside an hour, month rebuild from statistics,
+  notification dedupe/quiet/snooze/re-arm, daily events, quarter-based next action, and a
+  coordinator test that runs the real fast loop across an hour change.
+
 ## 2.10.2
 
 ### EV charger: start/stop fixed

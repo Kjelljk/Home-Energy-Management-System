@@ -47,6 +47,10 @@ from .const import (
     CONF_EV_TARGET_SOC_ENTITY,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
+    CONF_HOUR_ENERGY_SENSOR,
+    CONF_NOTIFY_QUIET_END,
+    CONF_NOTIFY_QUIET_START,
+    CONF_NOTIFY_SERVICE,
     CONF_HEATING_COEFFICIENT,
     CONF_INSULATION_CLASS,
     CONF_MIN_TEMP_ENTITY,
@@ -108,6 +112,8 @@ from .actuation import (
 from .grid_tariff import GridTariffSchedule
 from .price_engine import EnergyPriceEngine, PriceSeries72h, build_workday_mask, is_norwegian_workday
 from .card_model import next_action, plan_index, plan_window, ui_status, value_at
+from .energy_meter import ClosedHour, HourEnergyTracker, rebuild_month
+from .notifier import ACTION_IGNORE, ACTION_PRIORITY_NOW, NotifySettings, Notifier, parse_hhmm
 from .occupancy import OCC_SELECT_OPTIONS, OccupancyProfile, apply_selector, effective_state
 from .shadow import ShadowEvaluator
 from .storage import PowerControllerStore
@@ -187,6 +193,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.hour_allowance_kwh: float = 4.85
         self.p_avg_60m_kw: float = 0.0
         self.energy_this_hour_kwh: float = 0.0
+        self.hour_energy_source: str = "integrated"
         self.energy_projected_kwh: float = 0.0
         self.warning_active: bool = False
         self.safe_mode_active: bool = False
@@ -225,6 +232,15 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._planner_running = False
         self._tariff_version_id: str | None = None
         self._unsubs: list[Any] = []
+        self._grid_unsubs: list[Any] = []
+        # hourly energy (integrated grid power or hourly utility-meter sensor) and notifications
+        self.hour_meter = HourEnergyTracker()
+        self.month_source: dict = {"source": "live"}
+        self.notifier = Notifier()
+        self._setpoint_mismatch_since: dict[str, datetime] = {}
+        self._ocpp_rejected: dict[str, datetime] = {}
+        self._plan_failed = False
+        self._stepped_up_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Setup / persistence
@@ -254,8 +270,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hour = saved.get("hour", {})
         if hour.get("key") == now.strftime("%Y-%m-%dT%H"):
             self._hour_key = hour["key"]
-            self._hour_start_meter_kwh = hour.get("meter_start")
             self._hour_dev_kwh = dict(hour.get("device_kwh", {}))
+            self.hour_meter.restore(hour.get("tracker"), now)
+        self.notifier.restore(saved.get("notifier"))
         counters = saved.get("day_counters", {})
         if counters.get("day") == now.strftime("%Y-%m-%d"):
             self._day_key = counters["day"]
@@ -287,24 +304,64 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._zones_without_seed.clear()
 
         self._unsubs += [
-            async_track_time_change(self.hass, self._handle_hourly_rollover, minute=0, second=5),
+            # the hour is closed by the fast loop in the step that sees the new hour; this
+            # trigger only makes that happen within a second of the hour change
+            async_track_time_change(self.hass, self._handle_hour_tick, minute=0, second=1),
+            # recorder statistics for the finished hour exist a few minutes after the hour
+            async_track_time_change(self.hass, self._handle_month_reconcile, minute=6, second=0),
+            async_track_time_change(self.hass, self._handle_price_check, hour=15, minute=0, second=0),
             async_track_time_change(self.hass, self._handle_scheduled_planning, minute=59, second=0),
             async_track_time_change(self.hass, self._handle_daily_price_update, hour=13, minute=5, second=0),
             async_track_interval(self.hass, self._handle_slow_loop, timedelta(seconds=60)),
         ]
+        self._subscribe_hub_sensors()
+        self._apply_notify_settings()
+        self._unsubs.append(self.hass.bus.async_listen("mobile_app_notification_action", self._handle_notify_action))
+        self._tariff_version_id = self.price_engine.tariff_version(now.date()).id
+        await self.async_rebuild_month_from_statistics()
+        await self.async_run_price_update()
+        await self.async_run_planner()
+
+    def _subscribe_hub_sensors(self) -> None:
+        for unsub in self._grid_unsubs:
+            unsub()
+        self._grid_unsubs = []
         cfg = self._hub_cfg()
         watched = [cfg.get(k) for k in (CONF_ACTIVE_POWER_SENSOR, CONF_CURRENT_L1_SENSOR, CONF_CURRENT_L2_SENSOR, CONF_CURRENT_L3_SENSOR)]
         watched = [e for e in watched if e]
         if watched:
-            self._unsubs.append(async_track_state_change_event(self.hass, watched, self._handle_grid_sensor_event))
+            self._grid_unsubs.append(async_track_state_change_event(self.hass, watched, self._handle_grid_sensor_event))
         if cfg.get(CONF_NORDPOOL_SENSOR):
-            self._unsubs.append(
+            self._grid_unsubs.append(
                 async_track_state_change_event(self.hass, [cfg[CONF_NORDPOOL_SENSOR]], self._handle_nordpool_event)
             )
 
-        self._tariff_version_id = self.price_engine.tariff_version(now.date()).id
-        await self.async_run_price_update()
-        await self.async_run_planner()
+    def _apply_notify_settings(self) -> None:
+        from datetime import time as _time
+        cfg = self._hub_cfg()
+        self.notifier.settings = NotifySettings(
+            service=cfg.get(CONF_NOTIFY_SERVICE) or None,
+            quiet_start=parse_hhmm(cfg.get(CONF_NOTIFY_QUIET_START), _time(23, 0)),
+            quiet_end=parse_hhmm(cfg.get(CONF_NOTIFY_QUIET_END), _time(7, 0)),
+        )
+
+    async def async_hub_reconfigured(self) -> None:
+        """Hub options changed (sensors, overload, notifications): apply WITHOUT reloading."""
+        cfg = self._hub_cfg()
+        self.limiters.oa.params = OAParams(**{
+            key: float(cfg[conf]) for key, conf in OA_CONF_MAP.items() if cfg.get(conf) is not None
+        })
+        self._subscribe_hub_sensors()
+        self._apply_notify_settings()
+        self._entity_cache.clear()
+        await self.async_rebuild_month_from_statistics()
+        await self.async_settings_changed()
+
+    async def async_subentry_reconfigured(self, entry: ConfigEntry) -> None:
+        """Device/zone options changed: re-read the entry and replan WITHOUT reloading."""
+        self.register_subentry(entry)
+        self._entity_cache.clear()
+        await self.async_settings_changed(reprice=False)
 
     async def async_apply_grid_tariff(self, schedule: GridTariffSchedule) -> None:
         """Called by the options flow: store the edited tariff and reload the hub so that
@@ -396,8 +453,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "ev_min_since": {k: iso(v) for k, v in self.ev_min_since.items()},
             "ev_connected": dict(self._ev_was_connected),
         }
-        d["hour"] = {"key": self._hour_key, "meter_start": self._hour_start_meter_kwh,
-                     "device_kwh": dict(self._hour_dev_kwh)}
+        d["hour"] = {"key": self._hour_key, "device_kwh": dict(self._hour_dev_kwh),
+                     "tracker": self.hour_meter.to_dict()}
+        d["notifier"] = self.notifier.to_dict()
         d["shadow"] = self.shadow.to_dict()
         d["plan_history"] = self.plan_history[-168:]
         d["day_counters"] = {"day": self._day_key, "energy": self._day_energy_kwh, "runtime": self._day_runtime_h}
@@ -455,9 +513,10 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             store.pop(entry_id, None)
 
     async def async_shutdown(self) -> None:
-        for unsub in self._unsubs:
+        for unsub in self._unsubs + self._grid_unsubs:
             unsub()
         self._unsubs.clear()
+        self._grid_unsubs.clear()
         await self._async_persist_state()
 
     # ------------------------------------------------------------------
@@ -517,13 +576,14 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return float((d.get(CONF_NOMINAL_POWER_KW) or 0.0))
         return 0.0
 
-    async def _safe_call(self, domain: str, service: str, data: dict[str, Any]) -> bool:
-        """Service call that never takes the control loop down."""
+    async def _safe_call(self, domain: str, service: str, data: dict[str, Any], blocking: bool = False) -> bool:
+        """Service call that never takes the control loop down. ``blocking`` waits for the
+        result so a rejected command (e.g. OCPP) is detected."""
         if not self.hass.services.has_service(domain, service):
             _LOGGER.warning("Service %s.%s not available (integration not loaded?)", domain, service)
             return False
         try:
-            await self.hass.services.async_call(domain, service, data, blocking=False)
+            await self.hass.services.async_call(domain, service, data, blocking=blocking)
             return True
         except Exception as err:  # noqa: BLE001
             _LOGGER.warning("Service %s.%s failed: %s", domain, service, err)
@@ -684,27 +744,206 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         await self.async_run_planner()
 
     @callback
-    def _handle_hourly_rollover(self, now: datetime) -> None:
-        self.hass.async_create_task(self._async_process_hourly_rollover(now))
+    def _handle_hour_tick(self, _now: datetime) -> None:
+        self.hass.async_create_task(self.async_request_refresh())
 
-    async def _async_process_hourly_rollover(self, now: datetime) -> None:
+    @callback
+    def _handle_month_reconcile(self, _now: datetime) -> None:
+        self.hass.async_create_task(self.async_rebuild_month_from_statistics())
+
+    def _hour_price(self, ts: datetime, month_kwh_before: float) -> float:
+        """All-in price incl. VAT for a past or current hour (spot from the stored history)."""
+        pe = self.price_engine
+        spot = pe._history_price(ts)
+        if spot is None and self.price_series and self.price_series.timestamps:
+            i = int((ts - self.price_series.timestamps[0]).total_seconds() // 3600)
+            if 0 <= i < len(self.price_series.raw_spot_72h):
+                spot = self.price_series.raw_spot_72h[i]
+        if spot is None:
+            spot = pe.norgespris_nok
+        energy = pe.energy_price_after_support(float(spot), float(month_kwh_before))
+        grid, fee, _ = pe.grid_price_at(ts, self.is_workday(ts.date()))
+        return (energy + pe.supplier_markup_nok + grid + fee) * (1 + pe.vat_percent / 100.0)
+
+    async def _async_meter_hour_stats(self, start: datetime, end: datetime) -> list[tuple[datetime, float]] | None:
+        """Hourly energy (kWh) of the total import meter from the recorder's statistics."""
+        meter = self._hub_cfg().get(CONF_MONTHLY_ENERGY_SENSOR)
+        if not meter:
+            return None
+        try:
+            from homeassistant.components.recorder import get_instance
+            from homeassistant.components.recorder.statistics import statistics_during_period
+        except ImportError:
+            return None
+        try:
+            res = await get_instance(self.hass).async_add_executor_job(
+                statistics_during_period, self.hass, dt_util.as_utc(start), dt_util.as_utc(end),
+                {meter}, "hour", None, {"change"})
+        except Exception:  # noqa: BLE001
+            _LOGGER.debug("Could not read statistics for %s", meter, exc_info=True)
+            return None
+        rows = (res or {}).get(meter) or []
+        st = self.hass.states.get(meter)
+        unit = str(st.attributes.get("unit_of_measurement", "")).strip() if st else ""
+        factor = {"Wh": 0.001, "MWh": 1000.0}.get(unit, 1.0)
+        out = []
+        for r in rows:
+            ts = r.get("start")
+            if isinstance(ts, (int, float)):
+                ts = dt_util.utc_from_timestamp(ts)
+            elif isinstance(ts, str):
+                ts = dt_util.parse_datetime(ts)
+            if ts is None or r.get("change") is None:
+                continue
+            out.append((dt_util.as_local(ts), max(0.0, float(r["change"]) * factor)))
+        return out
+
+    async def async_rebuild_month_from_statistics(self) -> None:
+        """Month to date, daily peaks, top-3 and Norgespris from the meter's recorder statistics.
+        Runs at start-up and a few minutes after every hour, so restarts and missed hours heal."""
+        now = dt_util.now()
+        month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        hours = await self._async_meter_hour_stats(month_start, now)
+        if not hours:
+            self.month_source = {"source": "live", "reason": "no recorder statistics for the meter"}
+            return
+        before = self.price_engine.active_tariff_kw
+        summary = rebuild_month(self.price_engine, hours, self._hour_price, now)
+        if self.price_engine.active_tariff_kw > before and self._stepped_up_at is None:
+            self._stepped_up_at = now
+        self.month_source = {"source": "statistics", **summary, "rebuilt": now.isoformat()}
+        self.schedule_save()
+        self.async_set_updated_data(self._build_state_snapshot())
+
+    @callback
+    def _handle_price_check(self, _now: datetime) -> None:
+        self.hass.async_create_task(self.async_request_refresh())
+
+    # ------------------------------------------------------------------ notifications
+    def _tomorrow_prices_missing(self, now: datetime) -> bool:
+        if now.hour < 15:
+            return False
+        st = self.hass.states.get(self._hub_cfg().get(CONF_NORDPOOL_SENSOR) or "")
+        if st is None:
+            return True
+        tom = st.attributes.get("raw_tomorrow") or st.attributes.get("tomorrow") or []
+        return len([x for x in tom if x is not None]) < 23
+
+    def _notification_conditions(self, now: datetime) -> dict[str, dict]:
+        """Every error / early warning that is true right now (see notifier.EVENTS)."""
+        c: dict[str, dict] = {}
+        name = lambda eid: self.device_entries[eid].title if eid in self.device_entries else eid  # noqa: E731
+        if self.safe_mode_active:
+            c["safe_mode"] = {"message": "The grid power sensor has not updated. Power Controller limits the "
+                              "house to the safe-mode budget until it is back. Check the meter/HAN reader."}
+        for eid, ts in list(self._ocpp_rejected.items()):
+            if (now - ts).total_seconds() < 1800:
+                c[f"ocpp_rejected:{eid}"] = {"message": f"{name(eid)}: ocpp.set_charge_rate was not accepted. "
+                                             "Charging may not follow the plan – check the OCPP integration/log."}
+        if self.plan_result.solver == "fallback" or self._plan_failed:
+            c["plan_fallback"] = {"message": "The optimiser failed; a simple fallback plan is used. See the log."}
+        for eid in self.device_entries:
+            d = self.device_cfg(eid)
+            dtype = d.get(CONF_DEVICE_TYPE)
+            if not self.committed.get(eid):
+                continue
+            if dtype in (DeviceType.CLIMATE_HEATING, DeviceType.CLIMATE_HOTWATER):
+                cmd = self.commanded_setpoint.get(eid)
+                st = self.hass.states.get(d.get(CONF_TARGET_ENTITY) or "")
+                cur = st.attributes.get("temperature") if st else None
+                try:
+                    bad = cmd is not None and cur is not None and abs(float(cur) - float(cmd)) > 0.6
+                except (TypeError, ValueError):
+                    bad = False
+                if bad:
+                    since = self._setpoint_mismatch_since.setdefault(eid, now)
+                    if (now - since).total_seconds() >= 900:
+                        c[f"setpoint_ignored:{eid}"] = {"message": f"{name(eid)}: set to {float(cmd):.1f} °C but the device "
+                                                        f"reports {float(cur):.1f} °C for 15 min. Is it controlled elsewhere?"}
+                else:
+                    self._setpoint_mismatch_since.pop(eid, None)
+            if dtype == DeviceType.EV_CHARGER and self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)):
+                unmet = float(self.plan_result.unmet.get(eid) or 0.0)
+                min_unmet = float(self.plan_result.ev_min_unmet.get(eid) or 0.0)
+                if unmet > 0.5 or min_unmet > 0.5:
+                    what = f"minimum SoC ({min_unmet:.1f} kWh short)" if min_unmet > 0.5 else f"target ({unmet:.1f} kWh short)"
+                    c[f"ev_unmet:{eid}"] = {"message": f"{name(eid)} will not reach its {what} within the capacity step.",
+                                            "actions": [{"action": f"{ACTION_PRIORITY_NOW}|{eid}", "title": "Priority now"}]}
+        if self._tomorrow_prices_missing(now):
+            c["prices_missing"] = {"message": "Nord Pool prices for tomorrow are not available yet. The plan uses a forecast."}
+        minutes = now.minute + now.second / 60.0
+        committed_live = sum(self.get_device_live_power_kw(e) for e in self.device_entries if self.committed.get(e))
+        rest = self.energy_this_hour_kwh + max(0.0, self.grid_power_kw - committed_live) * (60.0 - minutes) / 60.0
+        if minutes >= 15 and rest > self.hour_allowance_kwh + 0.05:
+            c["hour_over"] = {"message": f"Even with all controlled devices off this hour ends at ≈ {rest:.2f} kWh "
+                              f"(allowed {self.hour_allowance_kwh:.2f}). Turn off something that is not controlled."}
+        if self._stepped_up_at and (now - self._stepped_up_at).total_seconds() < 3600:
+            c[f"step_up:{now:%Y-%m}"] = {"message": f"The top-3 average is {self.price_engine.monthly_max_kw:.2f} kWh/h; "
+                                         f"the {self.price_engine.active_tariff_kw:g} kW step applies for the rest of the month."}
+        if self.limiters.oa.any_limiting():
+            c["phase_limiting"] = {"message": "A phase has been over its rated current too long; power is being reduced."}
+        if self.price_engine.price_model == PriceModel.NORGESPRIS:
+            np_st = self.price_engine.norgespris_status(now, self.energy_this_hour_kwh)
+            if np_st.get("projected_reach_date"):
+                c[f"norgespris_volume:{now:%Y-%m}"] = {"message": f"At the current use the Norgespris volume runs out on "
+                                                        f"{np_st['projected_reach_date']} (≈ {np_st['remaining_kwh']:.0f} kWh left). "
+                                                        "Above it energy is billed at spot price."}
+        return c
+
+    async def _async_run_notifications(self, now: datetime) -> None:
+        try:
+            msgs = self.notifier.evaluate(self._notification_conditions(now), now)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Notification evaluation failed")
+            return
+        for msg in msgs:
+            _LOGGER.info("Power Controller %s: %s – %s", msg["level"], msg["title"], msg["message"])
+            call = self.notifier.service_call(msg)
+            if call:
+                await self._safe_call(*call)
+        if msgs:
+            self.schedule_save()
+
+    @callback
+    def _handle_notify_action(self, event: Event) -> None:
+        action = str(event.data.get("action") or "")
+        if not action.startswith("PC_"):
+            return
+        kind, _, arg = action.partition("|")
+        now = dt_util.now()
+        if kind == ACTION_IGNORE and arg:
+            self.notifier.snooze_today(arg, now)
+            self.schedule_save()
+        elif kind == ACTION_PRIORITY_NOW and arg in self.device_entries:
+            self.priority_now[arg] = True
+            self.hass.async_create_task(self.async_settings_changed(reprice=False))
+
+    async def async_test_notification(self) -> None:
+        msg = {"key": "test", "level": "warning", "title": "Power Controller: test",
+               "message": "Notifications from Power Controller reach this device.",
+               "actions": [{"action": f"{ACTION_IGNORE}|test", "title": "Ignore today"}], "ts": dt_util.now().isoformat()}
+        call = self.notifier.service_call(msg)
+        if call is None:
+            raise ValueError("No notify service configured (Configure → Sensors and general settings)")
+        await self._safe_call(*call)
+
+    async def _async_process_hourly_rollover(self, now: datetime, closed: ClosedHour) -> None:
+        """Book the hour that just ended (called from the fast loop in the step that saw the
+        new hour, with the energy of the ended hour – before anything is reset)."""
         self.warning_active = False
-        prev_hour = now - timedelta(hours=1)
-        price_prev = self.price_series.total_price_72h[0] if self.price_series else 0.0
-        self._close_shadow_hour(prev_hour)
-        self._record_plan_history(prev_hour)
-        stepped_up = self.price_engine.record_hourly_consumption(prev_hour, self.energy_this_hour_kwh, price_prev)
-        if now.day == 1 and now.hour == 0:
+        prev_hour = closed.hour_start
+        price_prev = self._hour_price(prev_hour, self.price_engine.monthly_energy_kwh)
+        if prev_hour.month != now.month:
             self.price_engine.reset_monthly_counters()
+            stepped_up = False
+        else:
+            stepped_up = self.price_engine.record_hourly_consumption(prev_hour, closed.kwh, price_prev)
+        if stepped_up:
+            self._stepped_up_at = now
         if now.strftime("%Y-%m-%d") != self._day_key:
             self._day_key = now.strftime("%Y-%m-%d")
             self._day_energy_kwh.clear()
             self._day_runtime_h.clear()
-
-        self._hour_key = now.strftime("%Y-%m-%dT%H")
-        self._hour_start_meter_kwh = self._read_float(self._hub_cfg().get(CONF_MONTHLY_ENERGY_SENSOR))
-        self.energy_this_hour_kwh = 0.0
-        self._hour_dev_kwh = {}
 
         # A new tariff version took effect (e.g. 1 January): reload so the per-period
         # price entities and capacity-step options follow the new price list.
@@ -808,8 +1047,10 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._planner_running = True
         try:
             await self._async_run_planner_inner()
+            self._plan_failed = False
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Planner run failed; keeping previous plan")
+            self._plan_failed = True
         finally:
             self._planner_running = False
 
@@ -1074,22 +1315,27 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         grid_valid = active_kw is not None
         self.grid_power_kw = active_kw or 0.0
 
-        # hourly energy (meter delta; baseline restored across restarts)
-        hour_key = now.strftime("%Y-%m-%dT%H")
-        meter = self._read_float(cfg.get(CONF_MONTHLY_ENERGY_SENSOR))
-        if self._hour_key != hour_key:
-            # first run this hour (startup): estimate already-used energy from average so far
-            self._hour_key = hour_key
-            self._hour_start_meter_kwh = None if meter is None else meter - self.grid_power_kw * now.minute / 60.0
-            self.schedule_save()
-        if meter is not None and self._hour_start_meter_kwh is not None:
-            self.energy_this_hour_kwh = max(0.0, meter - self._hour_start_meter_kwh)
-        else:
-            self.energy_this_hour_kwh += max(0.0, self.grid_power_kw) * dt_s / 3600.0
+        # Energy this hour: integrated grid power (like a kW→kWh utility meter reset every
+        # hour) or the configured hourly energy sensor. The ended hour is closed in this same
+        # step, with its own energy, before anything is reset.
+        hs_id = cfg.get(CONF_HOUR_ENERGY_SENSOR)
+        hs_state = self.hass.states.get(hs_id) if hs_id else None
+        hs_val = self._read_float(hs_id) if hs_id else None
+        closed = self.hour_meter.update(now, active_kw if grid_valid else None, hs_val,
+                                        dt_util.as_local(hs_state.last_updated) if hs_state is not None else None)
+        if closed is not None:
+            self.energy_this_hour_kwh = closed.kwh
+            self._close_shadow_hour(closed.hour_start)
+            self._record_plan_history(closed.hour_start)
+            self._hour_dev_kwh = {}
+            self.hass.async_create_task(self._async_process_hourly_rollover(now, closed))
+        self._hour_key = now.strftime("%Y-%m-%dT%H")
+        self.energy_this_hour_kwh = round(self.hour_meter.energy_this_hour_kwh, 4)
+        self.hour_energy_source = self.hour_meter.source
 
         minutes = now.minute + now.second / 60.0
         self.energy_projected_kwh = round(self.energy_this_hour_kwh + self.grid_power_kw * (60.0 - minutes) / 60.0, 3)
-        self.p_avg_60m_kw = round(self.energy_this_hour_kwh / max(1.0 / 60.0, minutes / 60.0), 3)
+        self.p_avg_60m_kw = self.hour_meter.avg_60min_kw(now)
 
         self.limiters.external_limit_a = self._read_float(cfg.get(CONF_EXTERNAL_LIMIT_SENSOR), max_age_s=timeout)
         self.hour_allowance_kwh = self.price_engine.hourly_energy_allowance_kwh(now.date())
@@ -1141,6 +1387,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 await self._actuate_device(now, eid, phase_limits, budget_kw)
             except Exception:  # noqa: BLE001 – one bad device must not stop the loop
                 _LOGGER.exception("Actuation failed for %s", eid)
+        await self._async_run_notifications(now)
         return self._build_state_snapshot()
 
     def _update_day_counters(self, dt_s: float) -> None:
@@ -1455,13 +1702,14 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _send_ev_limit(self, eid: str, d: dict, limit_a: int, now: datetime) -> bool:
         """ocpp.set_charge_rate: TxProfile on the active transaction, limit_amps before one exists."""
         data = ocpp_charge_rate_data(limit_a, int(d.get(CONF_EV_CONN_ID) or 1), self.ev_transaction_id(d))
-        ok = await self._safe_call("ocpp", "set_charge_rate", data)
+        ok = await self._safe_call("ocpp", "set_charge_rate", data, blocking=True)
         if ok:
             self._last_ev_target_a[eid] = int(limit_a)
             self._last_ocpp_cmd_ts[eid] = now
             self._last_ev_cmd_kind[eid] = "tx_profile" if "custom_profile" in data else "limit_amps"
         else:
             _LOGGER.warning("EV %s: set_charge_rate %s A was not accepted (data: %s)", eid, limit_a, data)
+            self._ocpp_rejected[eid] = now
         return ok
 
     # ------------------------------------------------------------------ EV target SoC
@@ -1666,7 +1914,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "setpoint_24h": plan_window(setpoints, self.plan_start, now, 24) if setpoints else None,
             "predicted_temp_24h": plan_window(self.plan_result.predicted_temps.get(eid), self.plan_start, now, 24)
             if self.plan_result.predicted_temps.get(eid) else None,
-            "next_action": next_action(plan, setpoints, self.plan_start, now),
+            # from the 15-minute plan: "next 21:30" / "planned now" instead of the hour start
+            "next_action": next_action(self.plans_15m.get(eid) or plan,
+                                       self.plan_slots.setpoints.get(eid) if self.plans_15m.get(eid) else setpoints,
+                                       self.plan_start, now, 1.0 / max(1, self.plan_spp) if self.plans_15m.get(eid) else 1.0),
+            "has_power_sensor": bool(d.get(CONF_POWER_SENSOR)),
             "plan_start": self.plan_start.isoformat() if self.plan_start else None,
             "plan_15m_24h": (self.plans_15m.get(eid) or [])[self.slot_idx(now) - self.slot_idx(now) % self.plan_spp:][:24 * self.plan_spp],
             "slots_per_hour": self.plan_spp,
@@ -1847,7 +2099,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ui_status", "live_kw", "allocated_kw", "lent_kw", "nominal_kw", "phase_pair", "next_action", "hold_remaining_s",
                 "current_temp", "comfort_temp", "eco_temp", "nominal_temp", "soc", "target_soc", "finish_by",
                 "runtime_required_h", "runtime_today_h", "energy_today_kwh", "entities", "forecast_only",
-                "governor", "governor_enabled", "dist_status", "dist_reason")})
+                "governor", "governor_enabled", "dist_status", "dist_reason", "has_power_sensor")})
             devices[-1]["plan_72h"] = self.plans_72h.get(eid)
             devices[-1]["heater_kind"] = a.get("heater_kind")
             devices[-1]["deadline_enabled"] = a.get("deadline_enabled")
@@ -1911,7 +2163,12 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "shadow_benefit_nok": shadow["benefit_nok"] if shadow else None,
                 "warning": self.warning_active,
                 "safe_mode": self.safe_mode_active,
+                "hour_energy_source": self.hour_energy_source,
+                "p_avg_60m_kw": self.p_avg_60m_kw,
+                "month_source": self.month_source,
             },
+            "notifications": {"service": self.notifier.settings.service, "log": self.notifier.log[-10:],
+                              "active": sorted(self.notifier.active)},
             "phases": {
                 ph: {"amps": round(self.phase_currents.get(ph, 0.0), 2), "rated_a": rated.get(ph),
                      **self.limiters.oa.snapshot().get(ph, {})}

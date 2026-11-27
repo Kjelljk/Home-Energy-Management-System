@@ -31,6 +31,10 @@ from .const import (
     CONF_EV_TARGET_SOC_ENTITY,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
+    CONF_HOUR_ENERGY_SENSOR,
+    CONF_NOTIFY_QUIET_END,
+    CONF_NOTIFY_QUIET_START,
+    CONF_NOTIFY_SERVICE,
     CONF_HEATER_KIND,
     CONF_HEATING_COEFFICIENT,
     HEATER_ON_OFF,
@@ -140,6 +144,7 @@ def _hub_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Required(CONF_MONTHLY_ENERGY_SENSOR, default=d.get(CONF_MONTHLY_ENERGY_SENSOR)): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
+            _opt(CONF_HOUR_ENERGY_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
             vol.Required(CONF_CURRENT_L1_SENSOR, default=d.get(CONF_CURRENT_L1_SENSOR)): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
@@ -165,6 +170,9 @@ def _hub_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             _opt(CONF_VOLTAGE_L12_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
             _opt(CONF_VOLTAGE_L23_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
             _opt(CONF_VOLTAGE_L31_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+            _opt(CONF_NOTIFY_SERVICE, d): selector.TextSelector(selector.TextSelectorConfig()),
+            vol.Optional(CONF_NOTIFY_QUIET_START, default=d.get(CONF_NOTIFY_QUIET_START) or "23:00"): str,
+            vol.Optional(CONF_NOTIFY_QUIET_END, default=d.get(CONF_NOTIFY_QUIET_END) or "07:00"): str,
             vol.Optional(
                 CONF_SENSOR_TIMEOUT_S, default=d.get(CONF_SENSOR_TIMEOUT_S, SENSOR_STALE_DEFAULT_S)
             ): selector.NumberSelector(selector.NumberSelectorConfig(min=10, max=900, step=10, mode="box")),
