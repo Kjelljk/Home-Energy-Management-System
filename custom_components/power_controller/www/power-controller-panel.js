@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.8.0";
+const PCP_VERSION = "2.9.0";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
@@ -24,7 +24,8 @@ const PCP_OCC = {
   away_work: ["Away (work)", "var(--divider-color, #ccc)"], sleep: ["Sleeping", "#3b4a8a"], out_of_town: ["Out of town", "#888"],
 };
 const PCP_TYPE = { climate_heating: "Heating", climate_hotwater: "Hot water", ev_charger: "EV charger", switch: "Switch" };
-const PCP_TABS = [["ov", "Overview"], ["pr", "Price"], ["pl", "Plan"], ["di", "Distribution"], ["dv", "Devices"], ["po", "Priorities"]];
+const PCP_TABS = [["ov", "Overview"], ["pr", "Price"], ["pl", "Plan"], ["di", "Distribution"], ["dv", "Devices"], ["po", "Priorities"], ["se", "Settings"]];
+const PCP_FS_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M5 5h5v2H7v3H5V5m9 0h5v5h-2V7h-3V5m3 9h2v5h-5v-2h3v-3m-7 3v2H5v-5h2v3h3z"/></svg>';
 const pE = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pN = (v) => (v === null || v === undefined || v === "" || isNaN(Number(v)) ? null : Number(v));
 const pF = (v, d = 2, fb = "–") => (pN(v) === null ? fb : Number(v).toFixed(d));
@@ -63,8 +64,9 @@ function pcBarChart(svg, width, o) {
   }
   for (let t = 0; t < n; t++) {
     const ts = o.times[t], x = L + t * bw;
-    if (ts && ts.getHours() === 0) s += `<line x1="${x}" x2="${x}" y1="${T}" y2="${T + ih}" class="dl"/><text x="${x + 4}" y="${T + 11}" class="tx b">${ts.toLocaleDateString(undefined, { weekday: "short" })}</text>`;
-    if (ts && ts.getHours() % step === 0) s += `<text x="${x + bw / 2}" y="${Ht - 10}" text-anchor="middle" class="tx">${String(ts.getHours()).padStart(2, "0")}</text>`;
+    const whole = ts && ts.getMinutes() === 0;
+    if (whole && ts.getHours() === 0) s += `<line x1="${x}" x2="${x}" y1="${T}" y2="${T + ih}" class="dl"/><text x="${x + 4}" y="${T + 11}" class="tx b">${ts.toLocaleDateString(undefined, { weekday: "short" })}</text>`;
+    if (whole && ts.getHours() % step === 0) s += `<text x="${x}" y="${Ht - 10}" text-anchor="middle" class="tx">${String(ts.getHours()).padStart(2, "0")}</text>`;
     let acc = 0;
     for (const b of o.bars) {
       const v = Math.max(0, pN(b.values[t]) ?? 0); if (v <= 0) continue;
@@ -104,7 +106,9 @@ function pcTsChart(svg, width, o) {
   if (o.stacked) for (let i = 0; i < o.bins; i++) { let a = 0; for (const st of o.stacked) a += Math.max(0, st.values[i] ?? 0); lmax = Math.max(lmax, a); }
   for (const se of o.series || []) for (const [, v] of se.points) { if (se.axis === "r") { rmin = Math.min(rmin, v); rmax = Math.max(rmax, v); } else lmax = Math.max(lmax, v); }
   lmax = niceMax(lmax * 1.05);
-  if (rmin === Infinity) { rmin = 0; rmax = 1; } else { rmin = Math.floor(rmin - 1); rmax = Math.ceil(rmax + 1); }
+  if (rmin === Infinity) { rmin = 0; rmax = 1; }
+  else if (o.rWindow) { rmin = Math.min(o.rWindow[0], Math.floor(rmin - 1)); rmax = Math.max(o.rWindow[1], Math.ceil(rmax + 1)); }
+  else { rmin = Math.floor(rmin - 1); rmax = Math.ceil(rmax + 1); }
   const yl = (v) => T + ih - ih * v / lmax, yr = (v) => T + ih - ih * (v - rmin) / (rmax - rmin);
   let s = "";
   for (let g = 0; g <= 4; g++) {
@@ -262,7 +266,7 @@ class PowerControllerPanel extends HTMLElement {
           ${img("price", "Price module diagram")}
           <div class="kpis" id="kpis-pr"></div>
           <div class="row">
-            <div class="card"><div class="hd"><div><h2>All-in price · 72 h</h2><div class="hint">NOK/kWh incl. VAT: energy after price model + grid energy charge + fees. Dashed: spot</div></div></div>
+            <div class="card"><div class="hd"><div><h2>All-in price · 72 h</h2><div class="hint">NOK/kWh incl. VAT: energy after price model + grid energy charge + fees. Dashed: spot · <span id="prres"></span></div></div></div>
               <div class="chartw" id="cw-pr"><svg id="svg-pr" role="img" aria-label="Price 72 hours"></svg><div class="tip" id="tip-pr"></div></div><div class="legend static" id="lg-pr"></div></div>
             <div class="card"><div class="hd"><h2>Norgespris volume</h2><span class="hint" id="npm"></span></div><div id="np"></div></div>
           </div>
@@ -296,6 +300,13 @@ class PowerControllerPanel extends HTMLElement {
               <div class="hint">Overload acceptance: small overloads are tolerated for a while, then the limit ramps to the rated current.</div></div>
             <div class="card"><div class="hd"><h2>Distribution decisions</h2></div><div id="dtab"></div></div>
           </div>
+        </section>
+
+        <section id="v-se" hidden>
+          <div class="card mb"><div class="hd"><div><h2>Settings</h2><div class="hint">The values you change most often. Changes are saved and the plan is recalculated at once.
+            Sensors, devices, zones and the full grid-tariff editor (hours, days, capacity steps, new price lists) are under Settings → Devices &amp; services.</div></div>
+            <a class="btn" href="/config/integrations/integration/power_controller">Open integration settings</a></div></div>
+          <div class="setg" id="setg"></div>
         </section>
 
         <section id="v-dv" hidden><div class="hd"><div><h2>Devices</h2><div class="hint">The object cards for everyday dashboards (custom:power-controller-object-card)</div></div></div><div class="dcs" id="cards"></div></section>
@@ -342,6 +353,7 @@ class PowerControllerPanel extends HTMLElement {
     r.getElementById("reset").addEventListener("click", () => { this._order = null; this._renderPrio(); r.getElementById("toast").textContent = ""; });
     r.getElementById("apply").addEventListener("click", () => this._applyPrio());
     this._bindPrioList();
+    this._addFullscreenButtons();
   }
 
   _redrawCharts() {
@@ -369,9 +381,35 @@ class PowerControllerPanel extends HTMLElement {
     this._redrawCharts();
     if (this._tab === "dv") this._renderCards(d);
     if (this._tab === "po") this._renderPrio();
+    if (this._tab === "se") this._renderSettings(d);
   }
 
   _w(id) { return this.shadowRoot.getElementById(id)?.clientWidth || 600; }
+
+  /* chart height: taller when its card is shown full screen */
+  _fsH(svgId, h) {
+    const fs = this.shadowRoot.fullscreenElement;
+    const el = this.shadowRoot.getElementById(svgId);
+    return fs && el && fs.contains(el) ? Math.max(h, window.innerHeight - 170) : h;
+  }
+
+  _addFullscreenButtons() {
+    const r = this.shadowRoot;
+    r.querySelectorAll(".card").forEach((card) => {
+      if (!card.querySelector(".chartw") || card.querySelector(".fsb")) return;
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "fsb"; b.title = "Full screen"; b.setAttribute("aria-label", "Show chart full screen");
+      b.innerHTML = PCP_FS_ICON;
+      b.addEventListener("click", () => {
+        if (r.fullscreenElement === card) document.exitFullscreen?.();
+        else card.requestFullscreen?.().catch(() => this._say("Full screen is not available in this browser."));
+      });
+      card.classList.add("fsable");
+      card.prepend(b);
+    });
+    this.shadowRoot.addEventListener("fullscreenchange", () => setTimeout(() => this._redrawCharts(), 60));
+    document.addEventListener("fullscreenchange", () => setTimeout(() => this._redrawCharts(), 60));
+  }
 
   // ------------------------------------------------------------------ shared builders
   _kpiHtml(items) {
@@ -437,7 +475,7 @@ class PowerControllerPanel extends HTMLElement {
     this._renderHistory(d);
     // plan (24 h) + device table
     const s = this._planSeries(d, 24);
-    const g = pcBarChart(r.getElementById("svg-ov"), this._w("cw-ov"), { n: 24, times: s.times, bars: s.bars, focusId: this._focus, height: 220, yLabel: "kWh/h", yrLabel: "NOK/kWh",
+    const g = pcBarChart(r.getElementById("svg-ov"), this._w("cw-ov"), { n: 24, times: s.times, bars: s.bars, focusId: this._focus, height: this._fsH("svg-ov", 220), yLabel: "kWh/h", yrLabel: "NOK/kWh",
       cap: { values: s.times.map((_, t) => s.at(d.plan.hour_cap_72h, t)), label: "hour allowance" },
       lines: [{ name: "price", color: "var(--primary-text-color)", values: s.times.map((_, t) => s.at(d.plan.price_72h, t)), axis: "r", step: true }] });
     this._geo.ov = { ...g, html: this._planTip(d, s) };
@@ -461,7 +499,7 @@ class PowerControllerPanel extends HTMLElement {
       const g = pcBin(gp, t0, now, bins).map((v) => v ?? 0);
       stacked.push({ name: "Other", color: "#94a3b8", values: g.map((v, j) => Math.max(0, v - sumBins[j])) });
     }
-    pcTsChart(r.getElementById("svg-live"), this._w("svg-live"), { t0, t1: now, bins, stacked, yLabel: "kW", height: 210 });
+    pcTsChart(r.getElementById("svg-live"), this._w("svg-live"), { t0, t1: now, bins, stacked, yLabel: "kW", height: this._fsH("svg-live", 210) });
     r.getElementById("lg-live").innerHTML = stacked.length ? stacked.map((st) => `<span class="lg static"><span class="sw" style="background:${st.color}"></span>${pE(st.name)}</span>`).join("")
       : `<span class="hint">No recorder history yet for the power sensors.</span>`;
     r.getElementById("livev").innerHTML = d.devices.map((x, i) => `<span><i class="sw" style="background:${this._color(i)}"></i>${pF(x.live_kw, 1)}</span>`).join("") + `<span><b>${pF(d.kpi.grid_power_kw, 1)} kW</b></span>`;
@@ -473,7 +511,7 @@ class PowerControllerPanel extends HTMLElement {
     const series = [];
     for (const [ph, id] of Object.entries(he.currents || {})) if (id && h[id]) series.push({ name: `${ph} A`, color: cc[ph], points: h[id].map(([t, v]) => [t, v * this._scale(id)]), width: 1.2 });
     for (const [lbl, id] of Object.entries(he.voltages || {})) if (id && h[id]) series.push({ name: `${lbl} V`, color: vc[lbl], axis: "r", points: h[id], width: 1 });
-    pcTsChart(r.getElementById("svg-ph"), this._w("svg-ph"), { t0: now - 24 * 3600e3, t1: now, series, yLabel: "A", yrLabel: "V", height: 210 });
+    pcTsChart(r.getElementById("svg-ph"), this._w("svg-ph"), { t0: now - 24 * 3600e3, t1: now, series, yLabel: "A", yrLabel: "V", height: this._fsH("svg-ph", 210), rWindow: [215, 230] });
     r.getElementById("lg-ph").innerHTML = series.length ? series.map((x) => `<span class="lg static"><span class="sw" style="background:${x.color}"></span>${x.name}</span>`).join("")
       : `<span class="hint">No recorder history yet. Voltage sensors are optional (Configure → Sensors and general settings).</span>`;
     r.getElementById("phv").innerHTML = ["L1", "L2", "L3"].map((ph) => `<span>${ph} <b>${pF(d.phases[ph]?.amps, 1)} A</b></span>`).join("");
@@ -494,7 +532,7 @@ class PowerControllerPanel extends HTMLElement {
     const bars = [{ id: "meas", name: "Measured", color: "#64748b", values: meas }];
     for (const b of s.bars) bars.push({ ...b, values: [...new Array(back).fill(null), ...b.values] });
     for (let t = 0; t < ahead; t++) price[back + t] = s.at(d.plan.price_72h, t);
-    const g = pcBarChart(r.getElementById("svg-hist"), this._w("cw-hist"), { n, times, bars, nowIdx: back, height: 260, yLabel: "kWh/h", yrLabel: "NOK/kWh",
+    const g = pcBarChart(r.getElementById("svg-hist"), this._w("cw-hist"), { n, times, bars, nowIdx: back, height: this._fsH("svg-hist", 260), yLabel: "kWh/h", yrLabel: "NOK/kWh",
       lines: [{ name: "price", color: "var(--primary-text-color)", values: price, axis: "r", step: true, gap: true },
         { name: "plan (past)", color: "var(--warning-color)", values: planned, dash: "3 3", width: 1.3, gap: true }] });
     this._geo.hist = { ...g, html: (i) => {
@@ -542,16 +580,23 @@ class PowerControllerPanel extends HTMLElement {
       ["Capacity charge", pNok(k.capacity_charge_nok), "NOK", `this month · top-3 ${pF(k.top3_mean_kw)} kWh/h`],
       ["Month to date", pNok(k.month_cost_nok), "NOK", `${pNok(k.month_energy_kwh)} kWh`],
     ]);
-    const idx = d.plan.index_now, n = 72 - idx, at = (a, t) => pN((a || [])[idx + t]);
-    const times = [...Array(n).keys()].map((t) => new Date(new Date(d.plan.start).getTime() + (idx + t) * 3600e3));
-    const energy = times.map((_, t) => at(d.plan.energy_72h, t));
-    const grid = times.map((_, t) => { const tot = at(d.plan.price_72h, t), e = at(d.plan.energy_72h, t); return tot === null || e === null ? null : Math.max(0, tot - e); });
-    const g = pcBarChart(r.getElementById("svg-pr"), this._w("cw-pr"), { n, times, height: 250, yLabel: "NOK/kWh",
+    // 15-minute prices (Nord Pool quarters) when available, otherwise hourly
+    const q = (d.plan.price_15m || []).length >= 4, spp = q ? 4 : 1;
+    const idx = d.plan.index_now * spp, n = 72 * spp - idx;
+    const hr = (t) => Math.floor((idx + t) / spp);
+    const tot = (t) => pN(q ? d.plan.price_15m[idx + t] : d.plan.price_72h[idx + t]);
+    const spot = (t) => pN(q ? d.plan.spot_15m[idx + t] : d.plan.spot_72h[idx + t]);
+    const gridH = (h) => { const a = pN(d.plan.price_72h[h]), e = pN(d.plan.energy_72h[h]); return a === null || e === null ? null : Math.max(0, a - e); };
+    const times = [...Array(n).keys()].map((t) => new Date(new Date(d.plan.start).getTime() + (idx + t) * 3600e3 / spp));
+    const grid = times.map((_, t) => gridH(hr(t)));
+    const energy = times.map((_, t) => { const a = tot(t), g = grid[t]; return a === null || g === null ? null : Math.max(0, a - g); });
+    const g = pcBarChart(r.getElementById("svg-pr"), this._w("cw-pr"), { n, times, height: this._fsH("svg-pr", 250), yLabel: "NOK/kWh",
       bars: [{ id: "e", name: "Energy", color: "#64748b", values: energy }, { id: "g", name: "Grid", color: "#a8a29e", values: grid }],
-      lines: [{ name: "spot", color: "var(--primary-text-color)", values: times.map((_, t) => at(d.plan.spot_72h, t)), dash: "4 3", width: 1.3 }] });
-    this._geo.pr = { ...g, html: (t) => `<b>${pDay(times[t])} ${pHH(times[t])}</b><div class="r"><span>All-in</span><b class="num">${pF(at(d.plan.price_72h, t))}</b></div>
-      <div class="r"><span>Energy</span><span class="num">${pF(energy[t])}</span></div><div class="r"><span>Grid (${pE((d.plan.grid_period_72h || [])[idx + t] || "")})</span><span class="num">${pF(grid[t])}</span></div>
-      <div class="r"><span>Spot incl. VAT</span><span class="num">${pF(at(d.plan.spot_72h, t))}</span></div>` };
+      lines: [{ name: "spot", color: "var(--primary-text-color)", values: times.map((_, t) => spot(t)), dash: "4 3", width: 1.3 }] });
+    this._geo.pr = { ...g, html: (t) => `<b>${pDay(times[t])} ${pHH(times[t])}${q ? "–" + pHH(new Date(times[t].getTime() + 900e3)) : ""}</b><div class="r"><span>All-in</span><b class="num">${pF(tot(t))}</b></div>
+      <div class="r"><span>Energy</span><span class="num">${pF(energy[t])}</span></div><div class="r"><span>Grid (${pE((d.plan.grid_period_72h || [])[hr(t)] || "")})</span><span class="num">${pF(grid[t])}</span></div>
+      <div class="r"><span>Spot incl. VAT</span><span class="num">${pF(spot(t))}</span></div>` };
+    r.getElementById("prres").textContent = q ? "15-minute prices (Nord Pool quarters)" : "hourly prices";
     r.getElementById("lg-pr").innerHTML = `<span class="lg static"><span class="sw" style="background:#64748b"></span>Energy</span><span class="lg static"><span class="sw" style="background:#a8a29e"></span>Grid + fees</span><span class="lg static"><span class="sw ln" style="border-color:var(--primary-text-color)"></span>Spot (shadow)</span>`;
     // Norgespris volume
     r.getElementById("npm").textContent = np.active ? "price model: Norgespris" : "not active (price model is not Norgespris)";
@@ -602,6 +647,47 @@ class PowerControllerPanel extends HTMLElement {
       <div class="hint">Optimiser gain on spot: ${pNok(sh.optimiser_gain_nok)} NOK · EV shortfall ${pF(sh.ev_shortfall_kwh, 1)} kWh · ${sh.hours} h counted (${sh.hours_estimated_spot} with estimated spot)</div>`;
   }
 
+  // ------------------------------------------------------------------ SETTINGS
+  _renderSettings(d) {
+    const box = this.shadowRoot.getElementById("setg");
+    if (!box) return;
+    const active = this.shadowRoot.activeElement;
+    if (active && box.contains(active) && ["INPUT", "SELECT"].includes(active.tagName)) return;   // don't disturb typing
+    const st = (id) => this._hass?.states?.[id];
+    const name = (id) => {
+      const n = st(id)?.attributes?.friendly_name || id;
+      return n.replace(/^Power Controller /, "");
+    };
+    const field = (id) => {
+      const s = st(id); if (!s) return "";
+      const dom = id.split(".")[0], a = s.attributes || {};
+      let ctl = "";
+      if (dom === "number") {
+        ctl = `<input type="number" data-eid="${pE(id)}" value="${pE(s.state)}" min="${pE(a.min)}" max="${pE(a.max)}" step="${pE(a.step)}" inputmode="decimal"><span class="u">${pE(a.unit_of_measurement || "")}</span>`;
+      } else if (dom === "select") {
+        ctl = `<select data-eid="${pE(id)}">${(a.options || []).map((o) => `<option ${o === s.state ? "selected" : ""}>${pE(o)}</option>`).join("")}</select>`;
+      } else if (dom === "time") {
+        ctl = `<input type="time" data-eid="${pE(id)}" value="${pE(String(s.state).slice(0, 5))}">`;
+      } else if (dom === "datetime") {
+        const v = s.state && s.state !== "unknown" ? new Date(s.state) : null;
+        const loc = v && !isNaN(v) ? new Date(v.getTime() - v.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "";
+        ctl = `<input type="datetime-local" data-eid="${pE(id)}" value="${loc}">`;
+      }
+      return `<label class="sf"><span>${pE(name(id))}<small>${pE(id)}</small></span><span class="sc2">${ctl}</span></label>`;
+    };
+    box.innerHTML = (d.settings || []).map((g) => `<div class="card"><h2>${pE(g.title)}</h2><div class="sfl">${g.entities.map(field).join("")}</div></div>`).join("");
+    box.querySelectorAll("[data-eid]").forEach((el) => el.addEventListener("change", () => {
+      const id = el.dataset.eid, dom = id.split(".")[0];
+      if (dom === "number") {
+        const v = Number(el.value); if (el.value === "" || isNaN(v)) return;
+        this._call("number", "set_value", { entity_id: id, value: v });
+      } else if (dom === "select") this._call("select", "select_option", { entity_id: id, option: el.value });
+      else if (dom === "time" && el.value) this._call("time", "set_value", { entity_id: id, time: `${el.value}:00` });
+      else if (dom === "datetime" && el.value) this._call("datetime", "set_value", { entity_id: id, datetime: `${el.value.replace("T", " ")}:00` });
+      this._say(`${name(id)} saved`);
+    }));
+  }
+
   // ------------------------------------------------------------------ PLAN
   _renderPlan(d) {
     if (!d) return;
@@ -611,7 +697,7 @@ class PowerControllerPanel extends HTMLElement {
       + `<span class="lg static"><span class="sw" style="background:#94a3b8"></span>Baseload</span><span class="lg static"><span class="sw ln" style="border-color:var(--primary-text-color)"></span>Price</span>`;
     lg.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { this._hidden[b.dataset.id] = !this._hidden[b.dataset.id]; this._renderPlan(this._data); }));
     const s = this._planSeries(d, n);
-    const g = pcBarChart(r.getElementById("svg-pl"), this._w("cw-pl"), { n, times: s.times, bars: s.bars, height: 290, yLabel: "kWh/h", yrLabel: "NOK/kWh",
+    const g = pcBarChart(r.getElementById("svg-pl"), this._w("cw-pl"), { n, times: s.times, bars: s.bars, height: this._fsH("svg-pl", 290), yLabel: "kWh/h", yrLabel: "NOK/kWh",
       cap: { values: s.times.map((_, t) => s.at(d.plan.hour_cap_72h, t)), label: "hour allowance" },
       lines: [{ name: "price", color: "var(--primary-text-color)", values: s.times.map((_, t) => s.at(d.plan.price_72h, t)), axis: "r", step: true }] });
     this._geo.pl = { ...g, html: this._planTip(d, s) };
@@ -653,7 +739,7 @@ class PowerControllerPanel extends HTMLElement {
       return;
     }
     const act = h.map((x) => x.actual_kwh), pl = h.map((x) => x.planned_kwh);
-    const g = pcBarChart(r.getElementById("svg-pva"), this._w("cw-pva"), { n: h.length, times, height: 230, yLabel: "kWh/h",
+    const g = pcBarChart(r.getElementById("svg-pva"), this._w("cw-pva"), { n: h.length, times, height: this._fsH("svg-pva", 230), yLabel: "kWh/h",
       bars: [{ id: "a", name: "Measured", color: "#64748b", values: act }],
       lines: [{ name: "Planned", color: "var(--warning-color)", values: pl, step: true, width: 1.4 }] });
     this._geo.pva = { ...g, html: (t) => `<b>${pDay(times[t])} ${pHH(times[t])}</b><div class="r"><span>Measured</span><b class="num">${pF(act[t])} kWh</b></div><div class="r"><span>Planned</span><span class="num">${pF(pl[t])} kWh</span></div>` };
@@ -686,87 +772,100 @@ class PowerControllerPanel extends HTMLElement {
   }
 
   _renderFlow(d, f) {
-    const r = this.shadowRoot, svg = r.getElementById("svg-flow"), W = Math.max(300, this._w("cw-flow")), wide = W >= 820;
+    const r = this.shadowRoot, svg = r.getElementById("svg-flow"), W = Math.max(300, this._w("cw-flow")), wide = W >= 760;
     const tl = f.tariff_limiter || {}, gl = f.grid_limiter || {}, dist = f.distribution || {}, oa = f.overload || {};
     const rated = gl.rated_a || {};
+    const oaWorst = ["L1", "L2", "L3"].some((ph) => oa[ph]?.state === "limiting") ? "var(--error-color)"
+      : ["L1", "L2", "L3"].some((ph) => oa[ph]?.state === "accepting") ? "var(--warning-color)" : "#7c6f9b";
     const chain = [
       { key: "grid", title: "Grid", lines: [`${pF(f.grid_kw)} kW`, `L1 ${pF(f.phase_a?.L1, 1)} · L2 ${pF(f.phase_a?.L2, 1)} · L3 ${pF(f.phase_a?.L3, 1)} A`], c: "#64748b" },
       { key: "gl", title: "Grid limiter", lines: [`${pF(rated.L1, 0)} A per phase`, `internal ${pF(gl.internal_a, 0)} · external ${gl.external_a ? pF(gl.external_a, 0) : "–"} A`, `binding: ${gl.binding || "internal"}`], c: "#7c6f9b" },
       { key: "tl", title: "Tariff limiter", lines: [`${pF(tl.energy_this_hour_kwh)} / ${pF(tl.hour_allowance_kwh)} kWh this hour`, `limit now ${pF(tl.limit_now_kw)} kW`, tl.safe_mode ? "SAFE MODE (grid sensor stale)" : ""], c: tl.safe_mode ? "var(--error-color)" : "#7c6f9b" },
-      { key: "oa", title: "Overload acceptance", lines: ["L1", "L2", "L3"].map((ph) => `${ph} ${oa[ph]?.state || "ok"} · ${pF(oa[ph]?.budget_pct, 0)} %`), c: ["L1", "L2", "L3"].some((ph) => oa[ph]?.state === "limiting") ? "var(--error-color)" : ["L1", "L2", "L3"].some((ph) => oa[ph]?.state === "accepting") ? "var(--warning-color)" : "#7c6f9b" },
+      { key: "oa", title: "Overload acceptance", lines: ["L1", "L2", "L3"].map((ph) => `${ph} ${oa[ph]?.state || "ok"} · ${pF(oa[ph]?.budget_pct, 0)} %`), c: oaWorst },
       { key: "dist", title: "Distribution", lines: [`budget ${pF(dist.budget_kw)} kW`, `reserved ${pF(dist.reserved_kw)} · lent ${pF(dist.lent_kw)} kW`, `unused ${pF(dist.unused_kw)} kW`], c: "#5f7f6a" },
     ];
     const side = [
       { key: "base", title: "Baseload", lines: [`${pF(f.baseload_kw)} kW`, "not controllable"], c: "#94a3b8" },
-      { key: "unc", title: "Not controlled devices", lines: [`${pF(f.uncommitted_kw)} kW`, "uncommitted"], c: "#94a3b8" },
+      { key: "unc", title: "Not controlled", lines: [`${pF(f.uncommitted_kw)} kW`, "uncommitted devices"], c: "#94a3b8" },
     ];
     const devs = d.devices.map((x, i) => ({ ...x, i }));
     const boxes = {}; let s = "", H;
-    const bh = 92, gap = 14;
     if (wide) {
-      const bw = (W - gap * 4) / 5;
-      chain.forEach((b, i) => { boxes[b.key] = { x: i * (bw + gap), y: 8, w: bw, h: bh, ...b }; });
-      side.forEach((b, i) => { boxes[b.key] = { x: i * (bw + gap), y: 8 + bh + 40, w: bw, h: 70, ...b }; });
-      const x0 = 2 * (bw + gap) + gap, dw = 180, cols = Math.max(1, Math.floor((W - x0 + gap) / (dw + gap)));
-      devs.forEach((x, i) => { const c = i % cols, rr = Math.floor(i / cols); boxes[x.entry_id] = { x: x0 + c * (dw + gap), y: 8 + bh + 60 + rr * (96 + 40), w: dw, h: 96 }; });
-      H = Math.max(8 + bh + 40 + 90, 8 + bh + 60 + Math.ceil(devs.length / cols) * 136) + 10;
+      // LEFT HALF: the limiter chain top-down, consumers that are subtracted first beside the grid.
+      // RIGHT HALF: one row per device. Lines only cross the gap between the halves.
+      const half = W / 2, pad = 10, gapX = 56, colW = Math.min(250, half - gapX - 120);
+      const cx = pad, sideX = cx + colW + 18, sideW = Math.max(100, half - gapX - sideX);
+      const bh = 70, vgap = 22;
+      chain.forEach((b, i) => { boxes[b.key] = { x: cx, y: 8 + i * (bh + vgap), w: colW, h: bh, ...b }; });
+      side.forEach((b, i) => { boxes[b.key] = { x: sideX, y: 8 + i * (58 + 12), w: sideW, h: 58, ...b }; });
+      const dx = half + gapX / 2, dw = W - dx - 120, dh = 58, dgap = 14;
+      const chainH = 8 + chain.length * (bh + vgap);
+      const devH = devs.length * (dh + dgap);
+      const y0 = Math.max(8, (chainH - devH) / 2);
+      devs.forEach((x, i) => { boxes[x.entry_id] = { x: dx, y: y0 + i * (dh + dgap), w: dw, h: dh }; });
+      H = Math.max(chainH, y0 + devH) + 10;
+      for (let i = 0; i < chain.length - 1; i++) {
+        const a = boxes[chain[i].key], b = boxes[chain[i + 1].key];
+        s += `<line x1="${a.x + a.w / 2}" y1="${a.y + a.h}" x2="${b.x + b.w / 2}" y2="${b.y - 3}" class="fl" marker-end="url(#ah)"/>`;
+      }
+      const g = boxes.grid;
+      side.forEach((sb) => { const b = boxes[sb.key]; s += `<path d="M${g.x + g.w},${g.y + g.h / 2} L${b.x - 4},${b.y + b.h / 2}" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah)"/>`; });
+      // distribution -> devices: leave the right edge of the box, fan out in the gap
+      const db = boxes.dist, sx = db.x + db.w, sy = db.y + db.h / 2, mid = sx + (dx - sx) * 0.55;
+      devs.forEach((x) => {
+        const b = boxes[x.entry_id], ty = b.y + b.h / 2, kw = pN(x.allocated_kw) ?? 0;
+        const st = PCP_STATUS[x.committed ? x.ui_status : "manual"] || PCP_STATUS.waiting;
+        const col = x.committed ? { ok: "var(--success-color)", info: "var(--info-color, var(--primary-color))", warn: "var(--warning-color)", bad: "var(--error-color)", mut: "var(--divider-color)" }[st[1]] : "var(--divider-color)";
+        s += `<path d="M${sx},${sy} C${mid},${sy} ${mid},${ty} ${b.x - 4},${ty}" fill="none" stroke="${col}" stroke-width="${1 + Math.min(8, kw * 1.4)}" ${kw > 0 && x.committed ? "" : 'stroke-dasharray="3 3"'} marker-end="url(#ah)" opacity=".9"/>`;
+        if (kw > 0) s += `<text x="${b.x - 8}" y="${ty - 6}" text-anchor="end" class="tx b">${pF(kw, 1)} kW</text>`;
+      });
+      // lending device -> device: arcs on the free right side of the device column
+      const ex = dx + dw;
+      for (const e of f.edges || []) {
+        if (!e.from) continue;
+        const a = boxes[e.from], b = boxes[e.to]; if (!a || !b) continue;
+        const y1 = a.y + a.h / 2, y2 = b.y + b.h / 2, bulge = ex + 30 + Math.min(40, Math.abs(y2 - y1) / 4);
+        s += `<path d="M${ex},${y1} C${bulge},${y1} ${bulge},${y2} ${ex + 4},${y2}" fill="none" stroke="var(--info-color, var(--primary-color))" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ahl)"/>`;
+        s += `<text x="${bulge + 4}" y="${(y1 + y2) / 2 + 4}" class="tx b">lends ${pF(e.kw, 1)} kW</text>`;
+      }
     } else {
       const bw = W - 20; let y = 8;
       chain.forEach((b) => { boxes[b.key] = { x: 10, y, w: bw, h: 78, ...b }; y += 78 + 22; if (b.key === "grid") { side.forEach((sb, j) => { boxes[sb.key] = { x: 10 + j * (bw / 2 + 4), y, w: bw / 2 - 4, h: 62, ...sb }; }); y += 62 + 22; } });
-      devs.forEach((x) => { boxes[x.entry_id] = { x: 40, y, w: bw - 64, h: 84 }; y += 84 + 14; });
+      devs.forEach((x) => { boxes[x.entry_id] = { x: 40, y, w: bw - 64, h: 70 }; y += 70 + 14; });
       H = y + 6;
+      for (let i = 0; i < chain.length - 1; i++) {
+        const a = boxes[chain[i].key], b = boxes[chain[i + 1].key];
+        s += `<line x1="${a.x + a.w / 2}" y1="${a.y + a.h + (chain[i].key === "grid" ? 62 + 44 : 0)}" x2="${b.x + b.w / 2}" y2="${b.y - 2}" class="fl" marker-end="url(#ah)"/>`;
+      }
+      const db = boxes.dist;
+      if (devs.length) { const last = boxes[devs[devs.length - 1].entry_id]; s += `<line x1="24" y1="${db.y + db.h}" x2="24" y2="${last.y + last.h / 2}" class="fl"/>`; }
+      devs.forEach((x) => {
+        const b = boxes[x.entry_id], kw = pN(x.allocated_kw) ?? 0;
+        s += `<line x1="24" y1="${b.y + b.h / 2}" x2="${b.x - 2}" y2="${b.y + b.h / 2}" stroke="var(--secondary-text-color)" stroke-width="${1 + Math.min(6, kw)}" marker-end="url(#ah)"/>`;
+      });
+      for (const e of f.edges || []) {
+        if (!e.from) continue;
+        const a = boxes[e.from], b = boxes[e.to]; if (!a || !b) continue;
+        const x1 = a.x + a.w, y1 = a.y + a.h / 2, y2 = b.y + b.h / 2, cx2 = x1 + 18;
+        s += `<path d="M${x1},${y1} C${cx2},${y1} ${cx2},${y2} ${x1 + 2},${y2}" fill="none" stroke="var(--info-color, var(--primary-color))" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ahl)"/>`;
+      }
     }
-    const arrow = (x1, y1, x2, y2, w, color, dash, label) => {
-      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-      let p = `<path d="M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}" fill="none" stroke="${color}" stroke-width="${w}" ${dash ? `stroke-dasharray="${dash}"` : ""} marker-end="url(#ah)" opacity=".85"/>`;
-      if (label) p += `<text x="${mx + 4}" y="${my - 4}" class="tx b">${label}</text>`;
-      return p;
-    };
-    // chain arrows
-    for (let i = 0; i < chain.length - 1; i++) {
-      const a = boxes[chain[i].key], b = boxes[chain[i + 1].key];
-      s += wide ? `<line x1="${a.x + a.w}" y1="${a.y + a.h / 2}" x2="${b.x - 2}" y2="${b.y + b.h / 2}" class="fl" marker-end="url(#ah)"/>`
-        : `<line x1="${a.x + a.w / 2}" y1="${a.y + a.h + (chain[i].key === "grid" ? 62 + 44 : 0)}" x2="${b.x + b.w / 2}" y2="${b.y - 2}" class="fl" marker-end="url(#ah)"/>`;
-    }
-    // grid -> side consumers
-    const g = boxes.grid;
-    side.forEach((sb) => { const b = boxes[sb.key]; s += arrow(g.x + g.w / 2, g.y + g.h, b.x + b.w / 2, b.y - 2, 1.5, "#94a3b8", "4 3"); });
-    // distribution -> devices (width ∝ granted from free headroom)
-    const db = boxes.dist;
-    devs.forEach((x) => {
-      if (!x.committed) return;
-      const b = boxes[x.entry_id], kw = pN(x.allocated_kw) ?? 0;
-      const st = PCP_STATUS[x.ui_status] || PCP_STATUS.waiting;
-      const col = { ok: "var(--success-color)", info: "var(--info-color, var(--primary-color))", warn: "var(--warning-color)", bad: "var(--error-color)", mut: "var(--divider-color)" }[st[1]];
-      s += wide ? arrow(db.x + db.w / 2, db.y + db.h, b.x + b.w / 2, b.y - 2, 1 + Math.min(8, kw * 1.4), col, kw > 0 ? null : "3 3")
-        : `<line x1="24" y1="${b.y + b.h / 2}" x2="${b.x - 2}" y2="${b.y + b.h / 2}" stroke="${col}" stroke-width="${1 + Math.min(8, kw * 1.4)}" marker-end="url(#ah)"/>`;
-    });
-    if (!wide && devs.length) { const last = boxes[devs[devs.length - 1].entry_id]; s += `<line x1="24" y1="${db.y + db.h}" x2="24" y2="${last.y + last.h / 2}" class="fl"/>`; }
-    // lending edges device -> device
-    for (const e of f.edges || []) {
-      if (!e.from) continue;
-      const a = boxes[e.from], b = boxes[e.to]; if (!a || !b) continue;
-      const x1 = wide ? a.x + a.w / 2 : a.x + a.w, y1 = wide ? a.y + a.h : a.y + a.h / 2;
-      const x2 = wide ? b.x + b.w / 2 : b.x + b.w, y2 = wide ? b.y + b.h : b.y + b.h / 2;
-      const cx = wide ? (x1 + x2) / 2 : Math.max(x1, x2) + 24, cy = wide ? Math.max(y1, y2) + 26 : (y1 + y2) / 2;
-      s += `<path d="M${x1},${y1} Q${cx},${cy} ${x2},${y2}" fill="none" stroke="var(--info-color, var(--primary-color))" stroke-width="2" stroke-dasharray="5 4" marker-end="url(#ah)"/>`;
-      s += wide ? `<text x="${cx - 20}" y="${cy - 2}" class="tx b">lends ${pF(e.kw, 1)} kW</text>`
-        : `<text x="${cx + 4}" y="${cy + 4}" class="tx b" transform="rotate(90 ${cx + 4} ${cy + 4})" text-anchor="middle">lends ${pF(e.kw, 1)} kW</text>`;
-    }
-    if (wide) H = Math.max(H, ...Object.values(boxes).map((b) => b.y + b.h + 40));
-    // boxes
+    // boxes last, so no line is drawn on top of a box
     const fit = (t, w, px) => { const n = Math.max(4, Math.floor((w - 20) / px)); t = String(t || ""); return t.length > n ? `${t.slice(0, n - 1)}…` : t; };
-    const boxSvg = (b, title, lines, color, extra = "") => `<g><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="10" class="bx"/><rect x="${b.x}" y="${b.y}" width="4" height="${b.h}" rx="2" fill="${color}"/>
-      <text x="${b.x + 12}" y="${b.y + 20}" class="bt"><title>${pE(title)}</title>${pE(fit(title, b.w, 7.6))}</text>${lines.filter(Boolean).map((l, i) => `<text x="${b.x + 12}" y="${b.y + 38 + i * 15}" class="bl">${pE(fit(l, b.w, 6.6))}</text>`).join("")}${extra}</g>`;
-    for (const b of [...chain, ...side]) s += boxSvg(boxes[b.key], b.title, b.lines, b.c);
+    const boxSvg = (b, title, lines, color) => `<g><rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="10" class="bx"/><rect x="${b.x}" y="${b.y}" width="4" height="${b.h}" rx="2" fill="${color}"/>
+      <text x="${b.x + 12}" y="${b.y + 18}" class="bt"><title>${pE(title)}</title>${pE(fit(title, b.w, 7.6))}</text>${lines.filter(Boolean).map((l, i) => `<text x="${b.x + 12}" y="${b.y + 35 + i * 14}" class="bl">${pE(fit(l, b.w, 6.4))}</text>`).join("")}</g>`;
+    let bx = "";
+    for (const b of [...chain, ...side]) bx += boxSvg(boxes[b.key], b.title, b.lines, b.c);
     devs.forEach((x) => {
       const b = boxes[x.entry_id], st = PCP_STATUS[x.committed ? x.ui_status : "manual"] || PCP_STATUS.waiting;
-      s += boxSvg(b, x.name, [`${st[0]}`, `${pF(x.live_kw)} / ${pF(x.allocated_kw)} kW`, x.committed ? `distribution #${x.dist_priority}` : "counted as load"], this._color(x.i));
+      bx += boxSvg(b, x.name, [`${st[0]} · ${pF(x.live_kw)} / ${pF(x.allocated_kw)} kW`, x.committed ? `#${x.dist_priority}` : "counted as load"], this._color(x.i));
     });
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("height", H);
-    svg.innerHTML = `<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--secondary-text-color)"/></marker></defs>${s}`;
-    r.getElementById("flowt").textContent = `updated ${pHH(new Date(d.now))}`;
+    svg.innerHTML = `<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" style="fill:var(--secondary-text-color)"/></marker>
+      <marker id="ahl" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" style="fill:var(--info-color, var(--primary-color))"/></marker></defs>${s}${bx}`;
+    r.getElementById("flowt").textContent = `updated ${pHH(new Date(d.now))}${d.urgent ? " · urgent: reductions sent at once" : ""}`;
   }
+
   _renderCards(d) {
     const box = this.shadowRoot.getElementById("cards");
     if (!customElements.get("power-controller-object-card") && !this._cardImport) {
@@ -964,6 +1063,18 @@ class PowerControllerPanel extends HTMLElement {
     .dt small{display:block;color:var(--secondary-text-color);font-size:11.5px}.dt.h{border-top:0;font-size:11px;text-transform:uppercase;color:var(--secondary-text-color);font-weight:600}
     .dt .num{text-align:right;font-variant-numeric:tabular-nums}
     .tabs button{font-size:13px;padding:7px 14px}
+    .fsable{position:relative}.fsb{position:absolute;top:10px;right:10px;z-index:3;width:30px;height:30px;border-radius:8px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--secondary-text-color);cursor:pointer;display:grid;place-items:center;opacity:.7}
+    .fsb:hover{opacity:1}.fsable>.hd{padding-right:38px}
+    .card:fullscreen{background:var(--primary-background-color);padding:24px;overflow:auto;border-radius:0}
+    .setg{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(360px,100%),1fr));gap:14px}
+    .setg h2{margin-bottom:10px}.sfl{display:flex;flex-direction:column}
+    .sf{display:flex;justify-content:space-between;align-items:center;gap:6px 12px;padding:8px 0;border-top:1px solid var(--divider-color);font-size:13px;flex-wrap:wrap}
+    .sf>span:first-child{min-width:0;flex:1 1 150px}
+    .sf small{display:block;font-size:11px;color:var(--secondary-text-color);font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere}
+    .sc2{display:flex;align-items:center;gap:6px;flex:0 1 auto;max-width:100%;margin-left:auto}.sc2 .u{font-size:12px;color:var(--secondary-text-color);min-width:30px}
+    .sf input,.sf select{font:inherit;font-size:13px;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:5px 8px;max-width:min(190px,100%);min-width:0}
+    .sf input[type=number]{width:96px}
+    a.btn{text-decoration:none;display:inline-block}
     [hidden]{display:none!important}
     </style>`;
   }

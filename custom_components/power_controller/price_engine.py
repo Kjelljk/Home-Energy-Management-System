@@ -110,6 +110,10 @@ class PriceSeries72h:
     spot_is_forecast_72h: list[bool]
     price_model: str = PriceModel.NORGESPRIS.value
     grid_period_72h: list[str] = field(default_factory=list)
+    # 15-minute resolution (Nord Pool quarter prices), 288 entries from start_time
+    total_price_15m: list[float] = field(default_factory=list)
+    raw_spot_15m: list[float] = field(default_factory=list)
+    energy_15m: list[float] = field(default_factory=list)      # energy part incl. mark-up, ex VAT
 
 
 def next_tier_above(value_kw: float, uppers: list[float], threshold_in_next: bool = True) -> float:
@@ -418,8 +422,13 @@ class EnergyPriceEngine:
         workday_mask_72h: list[bool],
         monthly_kwh_used: float,
         expected_load_kwh_72h: list[float] | None = None,
+        spot_quarters: list[float] | None = None,
     ) -> PriceSeries72h:
-        """All-in price per hour: (energy + mark-up + grid + fees) × (1 + VAT)."""
+        """All-in price per hour: (energy + mark-up + grid + fees) × (1 + VAT).
+
+        ``spot_quarters`` (known 15-minute spot prices from the current hour on) adds the
+        288-entry 15-minute series used by the planner. Unknown quarters use the hourly
+        (possibly forecast) price. Grid tariff and fees are per hour."""
         horizon = PLANNING_HORIZON_HOURS
         spots, forecast_flags = self.forecast_missing_spot_prices(start_time, spot_prices_72h, horizon)
         loads = (
@@ -431,6 +440,9 @@ class EnergyPriceEngine:
         running_kwh = float(monthly_kwh_used)
 
         timestamps, after_support, grid_prices, fees_and_vat, totals, periods = [], [], [], [], [], []
+        q_tot: list[float] = []
+        q_spots: list[float] = []
+        q_en: list[float] = []
         for idx in range(horizon):
             ts = start_time + timedelta(hours=idx)
             if idx > 0 and ts.month != timestamps[-1].month:
@@ -447,6 +459,16 @@ class EnergyPriceEngine:
             fee_vat = fee + basis * vat_mult
             total = energy + self.supplier_markup_nok + grid + fee_vat
 
+            for q in range(4):
+                qi = idx * 4 + q
+                sq = float(spot_quarters[qi]) if spot_quarters and qi < len(spot_quarters) and spot_quarters[qi] is not None \
+                    else float(spots[idx])
+                q_spots.append(round(sq, 5))
+                e_q = self.energy_price_after_support(sq, running_kwh - max(0.0, float(loads[idx])) + 0.25 * q * max(0.0, float(loads[idx])))
+                b_q = e_q + self.supplier_markup_nok + grid + fee
+                q_tot.append(round(e_q + self.supplier_markup_nok + grid + fee + b_q * vat_mult, 5))
+                q_en.append(round(e_q + self.supplier_markup_nok, 5))
+
             after_support.append(round(energy, 5))
             grid_prices.append(round(grid, 5))
             fees_and_vat.append(round(fee_vat, 5))
@@ -462,4 +484,7 @@ class EnergyPriceEngine:
             spot_is_forecast_72h=forecast_flags,
             price_model=self.price_model.value,
             grid_period_72h=periods,
+            total_price_15m=q_tot,
+            raw_spot_15m=q_spots,
+            energy_15m=q_en,
         )

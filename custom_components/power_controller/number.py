@@ -108,6 +108,50 @@ HUB_NUMBERS: tuple[_HubNumberSpec, ...] = (
         triggers_price=False,
     ),
     _HubNumberSpec(
+        "cmd_interval",
+        "Command Minimum Interval",
+        "min",
+        0.5,
+        30.0,
+        0.5,
+        lambda c: c.control.min_interval_s / 60.0,
+        lambda c, v: setattr(c.control, "min_interval_s", v * 60.0),
+        triggers_price=False,
+    ),
+    _HubNumberSpec(
+        "ev_min_step",
+        "EV Current Minimum Step",
+        "A",
+        1.0,
+        10.0,
+        1.0,
+        lambda c: c.control.ev_min_delta_a,
+        lambda c, v: setattr(c.control, "ev_min_delta_a", v),
+        triggers_price=False,
+    ),
+    _HubNumberSpec(
+        "setpoint_min_step",
+        "Setpoint Minimum Step",
+        "°C",
+        0.1,
+        3.0,
+        0.1,
+        lambda c: c.control.temp_min_delta_c,
+        lambda c, v: setattr(c.control, "temp_min_delta_c", v),
+        triggers_price=False,
+    ),
+    _HubNumberSpec(
+        "ev_delay_penalty",
+        "EV Delay Penalty",
+        "øre/kWh/h",
+        0.0,
+        50.0,
+        0.5,
+        lambda c: c.control.ev_delay_penalty_nok * 100.0,
+        lambda c, v: setattr(c.control, "ev_delay_penalty_nok", v / 100.0),
+        triggers_price=False,
+    ),
+    _HubNumberSpec(
         "vat",
         "VAT",
         "%",
@@ -169,6 +213,7 @@ async def async_setup_entry(
         dtype = DeviceType(entry.data[CONF_DEVICE_TYPE])
         if dtype == DeviceType.EV_CHARGER:
             entities.append(DeviceEvTargetSocNumber(coordinator, entry))
+            entities.append(DeviceEvMinSocNumber(coordinator, entry))
         elif dtype == DeviceType.SWITCH:
             entities.append(DeviceSwitchRuntimeNumber(coordinator, entry))
         async_add_entities(entities)
@@ -358,3 +403,24 @@ class GridTariffPriceNumber(CoordinatorEntity[PowerControllerCoordinator], Numbe
                 if p.id == self._key:
                     p.price = float(value)
         await self.coordinator.async_settings_changed()
+
+
+class DeviceEvMinSocNumber(_DeviceBaseNumber):
+    """Minimum state of charge (%) to reach within 24 h of plugging in (can be switched off)."""
+
+    _attr_native_unit_of_measurement = "%"
+    _attr_native_min_value = 0.0
+    _attr_native_max_value = 100.0
+    _attr_native_step = 5.0
+    _attr_icon = "mdi:battery-alert-variant-outline"
+
+    def __init__(self, coordinator: PowerControllerCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "min_soc")
+
+    @property
+    def native_value(self) -> float:
+        return self.coordinator.ev_min_soc.get(self._eid, 30.0)
+
+    async def async_set_native_value(self, value: float) -> None:
+        self.coordinator.ev_min_soc[self._eid] = float(value)
+        await self.coordinator.async_settings_changed(reprice=False)

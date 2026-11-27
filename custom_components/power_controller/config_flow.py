@@ -29,7 +29,10 @@ from .const import (
     CONF_EV_SOC_SENSOR,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
+    CONF_HEATER_KIND,
     CONF_HEATING_COEFFICIENT,
+    HEATER_ON_OFF,
+    HEATER_STEPLESS,
     CONF_INSULATION_CLASS,
     CONF_MIN_TEMP_ENTITY,
     CONF_MONTHLY_ENERGY_SENSOR,
@@ -266,6 +269,12 @@ def _device_schema(
                 vol.Required(CONF_NOMINAL_POWER_KW, default=d.get(CONF_NOMINAL_POWER_KW, 2.0)): float,
                 vol.Required(CONF_ZONE_ID, default=d.get(CONF_ZONE_ID, zone_options[0]["value"])): selector.SelectSelector(
                     selector.SelectSelectorConfig(options=zone_options, mode="dropdown")
+                ),
+                vol.Required(CONF_HEATER_KIND, default=d.get(CONF_HEATER_KIND, HEATER_ON_OFF)): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=[
+                        {"value": HEATER_STEPLESS, "label": "Stepless – modulates its power (heat pump)"},
+                        {"value": HEATER_ON_OFF, "label": "On/off – full power or nothing (panel heater, cable)"},
+                    ], mode="list")
                 ),
                 vol.Optional(CONF_HEATING_COEFFICIENT, default=d.get(CONF_HEATING_COEFFICIENT, 1.0)): float,
                 vol.Required(CONF_COMFORT_TEMP_ENTITY, default=d.get(CONF_COMFORT_TEMP_ENTITY)): selector.EntitySelector(

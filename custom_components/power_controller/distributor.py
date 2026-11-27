@@ -111,19 +111,20 @@ class PowerDistributor:
                 continue
 
             min_kw = self._min_kw(dev, dtype, p_nom)
-            want_kw = p_nom if (dtype != DeviceType.EV_CHARGER or dev.get("priority_now")) else max(min_kw, min(p_nom, planned_kw))
+            modulating = self._modulating(dev, dtype)
+            want_kw = p_nom if (not modulating or dev.get("priority_now")) else max(min_kw, min(p_nom, planned_kw))
             phase_headroom_kw = it_phase_amps_to_power_kw(min(avail_phase_a[p1], avail_phase_a[p2]))
             max_grant_kw = min(want_kw, avail_tariff_kw, phase_headroom_kw)
 
             if max_grant_kw >= min_kw:
-                grant_kw = max_grant_kw if dtype == DeviceType.EV_CHARGER else p_nom
+                grant_kw = max_grant_kw if modulating else p_nom
                 grant_a = power_kw_to_it_phase_amps(grant_kw)
                 avail_tariff_kw -= grant_kw
                 avail_phase_a[p1] -= grant_a
                 avail_phase_a[p2] -= grant_a
 
                 # Lending: reservation held but the device is idle (own thermostat satisfied)
-                if dtype != DeviceType.EV_CHARGER and live_kw < 0.15 * p_nom:
+                if dtype != DeviceType.EV_CHARGER and live_kw < 0.15 * grant_kw:
                     lenders.append([eid, grant_kw])
                     lent_pool_kw += grant_kw
                     lent_pool_a[p1] += grant_a
@@ -160,7 +161,7 @@ class PowerDistributor:
             eligible = dev.get("_was_planned") or bool(dev.get("opportunistic_need", False))
             headroom_kw = min(p_nom, total_kw, it_phase_amps_to_power_kw(min(total_a[p1], total_a[p2])))
             if eligible and headroom_kw >= min_kw:
-                grant_kw = headroom_kw if dtype == DeviceType.EV_CHARGER else p_nom
+                grant_kw = headroom_kw if self._modulating(dev, dtype) else p_nom
                 grant_a = power_kw_to_it_phase_amps(grant_kw)
                 # attribute the grant: free headroom first, then idle reservations (lending)
                 need = grant_kw
@@ -208,9 +209,17 @@ class PowerDistributor:
         return allocations
 
     @staticmethod
+    def _modulating(dev: dict, dtype: DeviceType) -> bool:
+        """EV chargers and stepless heaters can run at part load; on/off devices cannot."""
+        return dtype == DeviceType.EV_CHARGER or (
+            dtype == DeviceType.CLIMATE_HEATING and dev.get("heater_kind") == "stepless")
+
+    @staticmethod
     def _min_kw(dev: dict, dtype: DeviceType, p_nom: float) -> float:
         if dtype == DeviceType.EV_CHARGER:
             return it_phase_amps_to_power_kw(float(dev.get("min_current_a", 6.0)))
+        if dtype == DeviceType.CLIMATE_HEATING and dev.get("heater_kind") == "stepless":
+            return 0.25 * p_nom          # a modulating heat pump can run at part load
         return p_nom
 
     def compute_ev_feedforward_amps(

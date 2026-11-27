@@ -11,7 +11,9 @@ except ImportError:
         pass
 
 DOMAIN = "power_controller"
-VERSION = "2.8.0"  # keep in sync with manifest.json (used for frontend cache busting)
+
+VERSION = "2.9.0"  # keep in sync with manifest.json (used for frontend cache busting)
+
 PLATFORMS: list[str] = [
     "sensor",
     "binary_sensor",
@@ -162,6 +164,9 @@ CONF_TARGET_ENTITY = "target_entity"
 CONF_POWER_SENSOR = "power_sensor"
 CONF_SCHEDULE_ENTITY = "schedule_entity"
 CONF_HEATING_COEFFICIENT = "heating_coefficient"
+CONF_HEATER_KIND = "heater_kind"     # how the device delivers power (information for PC)
+HEATER_STEPLESS = "stepless"         # modulates its power (heat pump, inverter)
+HEATER_ON_OFF = "on_off"             # full power or nothing (panel heater, cable, element)
 
 # Config keys - EV Charger
 CONF_EV_AVAILABILITY_SWITCH = "ev_availability_switch"
