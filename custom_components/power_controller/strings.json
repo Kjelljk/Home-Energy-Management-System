@@ -66,11 +66,11 @@
           "daily_quota_hours": "Daily Runtime Quota Fallback [h]",
           "ev_min_current_a": "Minimum Charging Current [A]",
           "ev_battery_kwh": "EV Battery Capacity [kWh]",
-          "ev_availability_switch": "Charger Availability Switch",
+          "ev_availability_switch": "Charger Availability Switch (optional)",
           "ev_charge_switch": "Charge Control Switch",
-          "ev_transaction_sensor": "OCPP Transaction ID Sensor",
+          "ev_transaction_sensor": "OCPP Transaction ID Sensor (optional, recommended)",
           "ev_connected_sensor": "EV Connected Binary Sensor",
-          "ev_soc_sensor": "EV Battery SoC Sensor (%)",
+          "ev_soc_sensor": "EV Battery SoC Sensor (%) (optional)",
           "ev_conn_id": "OCPP Connector ID",
           "comfort_during": "Comfort temperature during",
           "heater_kind": "Heater type"
@@ -109,11 +109,11 @@
           "daily_quota_hours": "Daily Runtime Quota Fallback [h]",
           "ev_min_current_a": "Minimum Charging Current [A]",
           "ev_battery_kwh": "EV Battery Capacity [kWh]",
-          "ev_availability_switch": "Charger Availability Switch",
+          "ev_availability_switch": "Charger Availability Switch (optional)",
           "ev_charge_switch": "Charge Control Switch",
-          "ev_transaction_sensor": "OCPP Transaction ID Sensor",
+          "ev_transaction_sensor": "OCPP Transaction ID Sensor (optional, recommended)",
           "ev_connected_sensor": "EV Connected Binary Sensor",
-          "ev_soc_sensor": "EV Battery SoC Sensor (%)",
+          "ev_soc_sensor": "EV Battery SoC Sensor (%) (optional)",
           "ev_conn_id": "OCPP Connector ID",
           "zone_name": "Zone Name",
           "zone_area_m2": "Floor Area [m²]",
@@ -254,7 +254,8 @@
       "last_version": "The last version cannot be deleted"
     },
     "abort": {
-      "hub_not_loaded": "Power Controller is not running – try again in a moment"
+      "hub_not_loaded": "Power Controller is not running – try again in a moment",
+      "form_error": "Could not open the settings: {error}. Details are in the Home Assistant log (power_controller)."
     }
   }
 }

@@ -44,6 +44,7 @@ from .const import (
     CONF_EV_CONN_ID,
     CONF_EV_MIN_CURRENT_A,
     CONF_EV_SOC_SENSOR,
+    CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
     CONF_HEATING_COEFFICIENT,
     CONF_INSULATION_CLASS,
@@ -96,7 +97,13 @@ from .distributor import PowerDistributor
 from .limiters import GridAndTariffLimiters
 from .overload import OAParams
 from .planner import EnergyPlanner, PlanResult, aggregate_hourly
-from .actuation import ControlSettings, should_send_command, ev_min_soc_deadline
+from .actuation import (
+    ControlSettings,
+    ev_min_soc_deadline,
+    ocpp_charge_rate_data,
+    parse_transaction_id,
+    should_send_command,
+)
 from .grid_tariff import GridTariffSchedule
 from .price_engine import EnergyPriceEngine, PriceSeries72h, build_workday_mask, is_norwegian_workday
 from .card_model import next_action, plan_index, plan_window, ui_status, value_at
@@ -205,6 +212,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._last_fast_ts: datetime | None = None
         self._last_ev_target_a: dict[str, int] = {}
         self._last_ocpp_cmd_ts: dict[str, datetime] = {}
+        self._last_ev_cmd_kind: dict[str, str] = {}
         self._last_switch_ts: dict[str, datetime] = {}
         self._last_zone_sample: dict[str, tuple[datetime, float]] = {}
         self._legionella_high_minutes: dict[str, float] = {}
@@ -497,7 +505,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             # devices at the power they were granted
             if d.get(CONF_HEATER_KIND) == "stepless":
                 return float(alloc.allowed_kw)
-            return float(d.get(CONF_NOMINAL_POWER_KW, 0.0))
+            return float((d.get(CONF_NOMINAL_POWER_KW) or 0.0))
         return 0.0
 
     async def _safe_call(self, domain: str, service: str, data: dict[str, Any]) -> bool:
@@ -880,7 +888,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "entry_id": eid,
             "device_type": dtype,
             "phase_pair": d.get(CONF_PHASE_PAIR, PhasePair.L1_L2),
-            "nominal_power_kw": float(d.get(CONF_NOMINAL_POWER_KW, 1.0)),
+            "nominal_power_kw": float((d.get(CONF_NOMINAL_POWER_KW) or 1.0)),
             "plan_priority": self.plan_priority.get(eid, 5),
             "committed": self.committed.get(eid, False),
             "priority_now": self.priority_now.get(eid, False),
@@ -919,7 +927,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             avail = self._state_on(d.get(CONF_EV_AVAILABILITY_SWITCH))
             connected = bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR))) and avail is not False
             soc = self._read_float(d.get(CONF_EV_SOC_SENSOR))
-            cap_kwh = float(d.get(CONF_EV_BATTERY_KWH, 75.0))
+            cap_kwh = float((d.get(CONF_EV_BATTERY_KWH) or 75.0))
             tgt = self.target_soc.get(eid, 80.0)
             need = max(0.0, (tgt - (soc if soc is not None else 50.0)) / 100.0 * cap_kwh)
             min_soc = self.ev_min_soc.get(eid, 30.0)
@@ -931,7 +939,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 live_power_kw=self.get_device_live_power_kw(eid),
                 # a session only counts as charging when power actually flows
                 charging=connected and self.get_device_live_power_kw(eid) > 0.5,
-                min_power_kw=float(d.get(CONF_EV_MIN_CURRENT_A, 6)) * 230.0 / 1000.0,
+                min_power_kw=float((d.get(CONF_EV_MIN_CURRENT_A) or 6)) * 230.0 / 1000.0,
                 # "no deadline": charge as cheaply as possible within the horizon, sooner is better
                 finish_by=self.finish_by.get(eid) if self.ev_deadline_enabled.get(eid, True) else None,
                 min_energy_kwh=min_need if min_dl else 0.0,
@@ -1104,8 +1112,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "entry_id": eid,
                 "device_type": d[CONF_DEVICE_TYPE],
                 "phase_pair": d.get(CONF_PHASE_PAIR, PhasePair.L1_L2),
-                "nominal_power_kw": float(d.get(CONF_NOMINAL_POWER_KW, 1.0)),
-                "min_current_a": float(d.get(CONF_EV_MIN_CURRENT_A, 6)),
+                "nominal_power_kw": float((d.get(CONF_NOMINAL_POWER_KW) or 1.0)),
+                "min_current_a": float((d.get(CONF_EV_MIN_CURRENT_A) or 6)),
                 "live_power_kw": self.get_device_live_power_kw(eid),
                 "dist_priority": self.dist_priority.get(eid, 5),
                 "committed": self.committed.get(eid, False),
@@ -1364,8 +1372,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if alloc is None:
             return
         ev_kw = self.get_device_live_power_kw(eid)
-        min_a = int(d.get(CONF_EV_MIN_CURRENT_A, 6))
-        max_a = int(d.get(CONF_NOMINAL_CURRENT_A, 32))
+        min_a = int((d.get(CONF_EV_MIN_CURRENT_A) or 6))
+        max_a = int((d.get(CONF_NOMINAL_CURRENT_A) or 32))
         if alloc.allowed_kw <= 0.0:
             target_a = 0
         else:
@@ -1387,6 +1395,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         sw_state = self.hass.states.get(charge_sw) if charge_sw else None
         if target_a == 0:
             if sw_state and sw_state.state == "on" and (can_toggle or self.urgent_now()):
+                # stop: limit 0 A on the running transaction first, then switch charging off
+                if self._last_ev_target_a.get(eid) != 0:
+                    await self._send_ev_limit(eid, d, 0, now)
                 if await self._safe_call("switch", "turn_off", {"entity_id": charge_sw}):
                     self._last_switch_ts[eid] = now
             self._last_ev_target_a[eid] = 0
@@ -1401,11 +1412,24 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # once only when the hour allowance or a phase is at risk (never increases)
         if should_send_command(prev, target_a, last_cmd, now, self.control.ev_min_delta_a,
                                self.control.min_interval_s, urgent=self.urgent_now(), lower_is_relief=True):
-            # limit_amps works without a transaction id (no fragile JSON profile)
-            ok = await self._safe_call("ocpp", "set_charge_rate", {"limit_amps": target_a, "conn_id": int(d.get(CONF_EV_CONN_ID, 1))})
-            if ok:
-                self._last_ev_target_a[eid] = target_a
-                self._last_ocpp_cmd_ts[eid] = now
+            await self._send_ev_limit(eid, d, target_a, now)
+
+    def ev_transaction_id(self, d: dict) -> int | None:
+        ent = d.get(CONF_EV_TRANSACTION_SENSOR)
+        st = self.hass.states.get(ent) if ent else None
+        return parse_transaction_id(st.state if st else None)
+
+    async def _send_ev_limit(self, eid: str, d: dict, limit_a: int, now: datetime) -> bool:
+        """ocpp.set_charge_rate: TxProfile on the active transaction, limit_amps before one exists."""
+        data = ocpp_charge_rate_data(limit_a, int(d.get(CONF_EV_CONN_ID) or 1), self.ev_transaction_id(d))
+        ok = await self._safe_call("ocpp", "set_charge_rate", data)
+        if ok:
+            self._last_ev_target_a[eid] = int(limit_a)
+            self._last_ocpp_cmd_ts[eid] = now
+            self._last_ev_cmd_kind[eid] = "tx_profile" if "custom_profile" in data else "limit_amps"
+        else:
+            _LOGGER.warning("EV %s: set_charge_rate %s A was not accepted (data: %s)", eid, limit_a, data)
+        return ok
 
     async def async_release_device(self, eid: str) -> None:
         """Called when a device is set to Uncommitted: hand it back in a sane state."""
@@ -1426,7 +1450,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif dtype == DeviceType.SWITCH and target:
             await self._safe_call(target.split(".", 1)[0], "turn_on", {"entity_id": target})
         elif dtype == DeviceType.EV_CHARGER:
-            await self._safe_call("ocpp", "set_charge_rate", {"limit_amps": int(d.get(CONF_NOMINAL_CURRENT_A, 32)), "conn_id": int(d.get(CONF_EV_CONN_ID, 1))})
+            await self._send_ev_limit(eid, d, int(d.get(CONF_NOMINAL_CURRENT_A) or 32), dt_util.now())
         self._last_ev_target_a.pop(eid, None)
 
     # ------------------------------------------------------------------
@@ -1473,7 +1497,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 hot = water >= HOTWATER_LEGIONELLA_C
             else:
                 # No sensor: count the reserved cycle as done when the element actually ran at power
-                hot = 0 in reserved and self.get_device_live_power_kw(eid) > 0.5 * float(d.get(CONF_NOMINAL_POWER_KW, 2.0))
+                hot = 0 in reserved and self.get_device_live_power_kw(eid) > 0.5 * float((d.get(CONF_NOMINAL_POWER_KW) or 2.0))
             self._legionella_high_minutes[eid] = (self._legionella_high_minutes.get(eid, 0.0) + 1.0) if hot else 0.0
             if self._legionella_high_minutes[eid] >= 120.0:
                 self.store.data.setdefault("legionella_last_ok", {})[eid] = now.isoformat()
@@ -1559,6 +1583,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                      "min_soc_deadline": min_dl.isoformat() if min_dl else None,
                      "min_soc_unmet_kwh": self.plan_result.ev_min_unmet.get(eid),
                      "session_start": self.ev_session_start.get(eid).isoformat() if self.ev_session_start.get(eid) else None,
+                     "transaction_id": self.ev_transaction_id(d),
+                     "last_command_kind": self._last_ev_cmd_kind.get(eid),
                      "connected": bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)))}
         elif dtype == DeviceType.SWITCH:
             entities.update(runtime_hours=self.own_entity_id("number", f"{eid}_runtime_hours"))
@@ -1579,7 +1605,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "allocated_kw": alloc.allowed_kw if alloc else 0.0,
             "lent_kw": round(alloc.lent_kw, 3) if alloc else 0.0,
             "live_kw": round(live, 3),
-            "nominal_kw": float(d.get(CONF_NOMINAL_POWER_KW, 0.0)),
+            "nominal_kw": float((d.get(CONF_NOMINAL_POWER_KW) or 0.0)),
             "phase_pair": d.get(CONF_PHASE_PAIR, PhasePair.L1_L2),
             "phase_currents": {"L1": 0.0, "L2": 0.0, "L3": 0.0} | {p1: amps, p2: amps},
             "hold_remaining_s": hold_s,

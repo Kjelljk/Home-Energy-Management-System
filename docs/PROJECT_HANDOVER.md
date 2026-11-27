@@ -4,8 +4,8 @@
 without the earlier conversation. Read this first, then `README.md` (features) and
 `CHANGELOG.md` (per version).
 
-**Current version:** 2.10.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
-- Pure-Python engines: unit-tested (92 tests pass, ~5 s).
+**Current version:** 2.10.1. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
+- Pure-Python engines: unit-tested (95 tests pass, ~5 s).
 - HA layer: syntax/undefined-name checked; options flow and the card contract/panel feed are
   exercised with HA stubs. **Never run in a real Home Assistant instance yet.**
 - Frontend JS: exercised in Chromium with a mock `hass` (all buttons/steppers/selects, panel tabs,
@@ -26,7 +26,7 @@ without the earlier conversation. Read this first, then `README.md` (features) a
 1. v1 spec by the owner → Gemini v2.1 spec + first code (MILP, untested, many critical bugs).
 2. 2.2 rewrite (LP planner, editable grid tariff, persistence, robustness) → 2.3 overload
    acceptance + English only → 2.4 shadow evaluation (Norgespris vs. spot) → 2.5 occupancy and
-   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts → 2.10.0 partial lending, calmer heat pump (30 min, PI hysteresis, hourly setpoints), thermal-model view/reset/manual, help texts, priority-stacked plan.
+   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts → 2.10.0 partial lending, calmer heat pump (30 min, PI hysteresis, hourly setpoints), thermal-model view/reset/manual, help texts, priority-stacked plan → 2.10.1 OCPP TxProfile on the active transaction (actuation.ocpp_charge_rate_data), robust EV options form.
 
 ---
 
@@ -152,7 +152,7 @@ node --check custom_components/power_controller/www/*.js
 ## 6. Known gaps / next steps (priority order)
 1. **Run in a real Home Assistant** and fix what breaks; add `pytest-homeassistant-custom-component`
    tests (coordinator, config flow, entities, websocket, panel registration).
-2. Verify OCPP service names/parameters against the installed OCPP integration.
+2. OCPP: set_charge_rate uses a TxProfile (custom_profile JSON string) when the transaction sensor has an id, else limit_amps; verified only against the owner's automation, not against every charger.
 3. Object card: optional editing of *Comfort temperature during* (stored in config entry options).
 3b. Owner's plan: calendar/schedule entity for home office and home/away events feeding the planner.
 4. EV: 3-phase chargers not supported; SoC defaults to 50 % without a sensor.

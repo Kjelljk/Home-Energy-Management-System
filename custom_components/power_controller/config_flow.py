@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Any
+import logging
 import uuid
 import voluptuous as vol
 
@@ -89,12 +90,25 @@ from .grid_tariff import (
 )
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 def _opt(key: str, d: dict[str, Any]) -> vol.Optional:
     """Optional entity field. Home Assistant rejects ``default=None`` for entity selectors,
     which made e.g. the window sensor effectively mandatory. Existing values are shown as a
     suggestion instead, and the field can be left empty."""
     val = d.get(key)
     return vol.Optional(key, description={"suggested_value": val}) if val else vol.Optional(key)
+
+
+def _dv(d: dict[str, Any], key: str, default: Any, typ: type) -> Any:
+    """Default value for a numeric field: the stored value if it is a valid number, else the
+    default (stored ``None`` from a cleared field or a wrong type must not break the form)."""
+    try:
+        val = d.get(key)
+        return default if val is None or val == "" else typ(val)
+    except (TypeError, ValueError):
+        return default
 
 
 def _cleared(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
@@ -225,29 +239,29 @@ def _device_schema(
             {
                 vol.Required("name", default=d.get("name", "EV Charger")): str,
                 vol.Required(CONF_PHASE_PAIR, default=d.get(CONF_PHASE_PAIR, PhasePair.L1_L2)): phase_sel,
-                vol.Required(CONF_NOMINAL_CURRENT_A, default=d.get(CONF_NOMINAL_CURRENT_A, 32.0)): float,
-                vol.Required(CONF_NOMINAL_POWER_KW, default=d.get(CONF_NOMINAL_POWER_KW, 7.36)): float,
-                vol.Required(CONF_EV_MIN_CURRENT_A, default=d.get(CONF_EV_MIN_CURRENT_A, 6)): int,
-                vol.Required(CONF_EV_BATTERY_KWH, default=d.get(CONF_EV_BATTERY_KWH, 75.0)): float,
-                vol.Required(CONF_EV_AVAILABILITY_SWITCH, default=d.get(CONF_EV_AVAILABILITY_SWITCH)): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="switch")
-                ),
+                vol.Required(CONF_NOMINAL_CURRENT_A, default=_dv(d, CONF_NOMINAL_CURRENT_A, 32.0, float)): vol.Coerce(float),
+                vol.Required(CONF_NOMINAL_POWER_KW, default=_dv(d, CONF_NOMINAL_POWER_KW, 7.36, float)): vol.Coerce(float),
+                vol.Required(CONF_EV_MIN_CURRENT_A, default=_dv(d, CONF_EV_MIN_CURRENT_A, 6, int)): vol.Coerce(int),
+                vol.Required(CONF_EV_BATTERY_KWH, default=_dv(d, CONF_EV_BATTERY_KWH, 75.0, float)): vol.Coerce(float),
                 vol.Required(CONF_EV_CHARGE_SWITCH, default=d.get(CONF_EV_CHARGE_SWITCH)): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="switch")
-                ),
-                vol.Required(CONF_EV_TRANSACTION_SENSOR, default=d.get(CONF_EV_TRANSACTION_SENSOR)): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
-                ),
-                vol.Required(CONF_POWER_SENSOR, default=d.get(CONF_POWER_SENSOR)): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="sensor")
                 ),
                 vol.Required(CONF_EV_CONNECTED_SENSOR, default=d.get(CONF_EV_CONNECTED_SENSOR)): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="binary_sensor")
                 ),
-                vol.Required(CONF_EV_SOC_SENSOR, default=d.get(CONF_EV_SOC_SENSOR)): selector.EntitySelector(
+                _opt(CONF_EV_TRANSACTION_SENSOR, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 ),
-                vol.Optional(CONF_EV_CONN_ID, default=d.get(CONF_EV_CONN_ID, 1)): int,
+                _opt(CONF_EV_AVAILABILITY_SWITCH, d): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="switch")
+                ),
+                _opt(CONF_POWER_SENSOR, d): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                _opt(CONF_EV_SOC_SENSOR, d): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="sensor")
+                ),
+                vol.Optional(CONF_EV_CONN_ID, default=_dv(d, CONF_EV_CONN_ID, 1, int)): vol.Coerce(int),
             }
         )
 
@@ -480,6 +494,14 @@ class PowerControllerOptionsFlow(OptionsFlow):
 
     # ------------------------------------------------------------------ entry point
     async def async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
+        try:
+            return await self._async_step_init(user_input)
+        except Exception as err:  # noqa: BLE001 – show the cause instead of "Unknown error"
+            _LOGGER.exception("Power Controller: could not open the settings for %s", self._entry.title)
+            return self.async_abort(reason="form_error",
+                                    description_placeholders={"error": f"{type(err).__name__}: {err}"})
+
+    async def _async_step_init(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         merged = {**self._entry.data, **self._entry.options}
         etype = merged.get("entry_type", ENTRY_TYPE_HUB)
         if etype == ENTRY_TYPE_HUB:

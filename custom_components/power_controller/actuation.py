@@ -13,6 +13,7 @@ connected, so the planner cannot keep postponing it.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 
@@ -76,3 +77,43 @@ def ev_min_soc_deadline(session_start: datetime | None, min_since: datetime | No
     if not starts:
         return None
     return max(starts) + timedelta(hours=window_h)
+
+
+def parse_transaction_id(state: str | None) -> int | None:
+    """OCPP transaction id from a sensor state; None when there is no active transaction."""
+    if state is None:
+        return None
+    s = str(state).strip()
+    if s.lower() in ("", "unknown", "unavailable", "none", "null", "0"):
+        return None
+    try:
+        tid = int(float(s))
+    except (TypeError, ValueError):
+        return None
+    return tid if tid > 0 else None
+
+
+def ocpp_charge_rate_data(limit_a: int, conn_id: int, transaction_id: int | None) -> dict:
+    """Service data for ``ocpp.set_charge_rate``.
+
+    With an active transaction a TxProfile (relative, stack level 0) bound to the transaction is
+    sent – the same profile the owner's working automation used; many chargers ignore a plain
+    ``limit_amps`` default profile. Without a transaction (before charging starts) ``limit_amps``
+    is used as fallback.
+    """
+    limit_a = max(0, int(limit_a))
+    conn_id = int(conn_id or 1)
+    if transaction_id is None:
+        return {"limit_amps": limit_a, "conn_id": conn_id}
+    profile = {
+        "transactionId": int(transaction_id),
+        "chargingProfileId": 1,
+        "stackLevel": 0,
+        "chargingProfilePurpose": "TxProfile",
+        "chargingProfileKind": "Relative",
+        "chargingSchedule": {
+            "chargingRateUnit": "A",
+            "chargingSchedulePeriod": [{"startPeriod": 0, "limit": limit_a}],
+        },
+    }
+    return {"custom_profile": json.dumps(profile), "conn_id": conn_id}

@@ -1,5 +1,28 @@
 # Changelog
 
+## 2.10.1
+
+### EV charger (OCPP)
+- Charging current is now sent as a **TxProfile on the active transaction** (`ocpp.set_charge_rate`
+  with `custom_profile`: transactionId from the transaction sensor, chargingProfileId 1, stackLevel 0,
+  Relative, limit in A) – the same profile as the owner's working automation. Many chargers ignore
+  the plain `limit_amps` default profile, which is why charging did not follow the plan.
+- Before a transaction exists (sensor empty/unknown/0) `limit_amps` is used as fallback.
+- Stop = limit 0 A on the transaction, then the charge switch off.
+- Failed commands are logged with the exact service data. The EV plan sensor shows
+  `transaction_id` and `last_command_kind` (tx_profile / limit_amps).
+
+### Settings dialog for devices
+- EV form: transaction sensor, availability switch, power sensor and SoC sensor are optional;
+  numeric fields use the stored value only if it is a valid number (a cleared/None value could
+  break the form). Verified by serialising the form with the same library Home Assistant uses.
+- Numeric EV settings that were stored empty no longer break the control loop.
+- If a device's settings dialog cannot be opened, the reason is shown in the dialog and the full
+  traceback is written to the Home Assistant log instead of "Unknown error".
+
+### Tests
+- 3 new tests (95 total): transaction id parsing, TxProfile content, fallback and stop.
+
 ## 2.10.0
 
 ### Redistribution: the unused part is lent
