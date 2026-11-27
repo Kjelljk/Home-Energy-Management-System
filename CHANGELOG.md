@@ -1,5 +1,30 @@
 # Changelog
 
+## 2.11.1
+
+### Capacity step jumped to the top step (bug fix)
+- **Cause:** the month is rebuilt from the meter's recorder statistics. After Home Assistant has
+  been down (restarts, updates) the statistics put the energy of the whole outage into the first
+  hour afterwards. Three such hours on three days gave a top-3 average of 31 kWh/h, which locked
+  the 25–50 kW step: limit now ≈ 60 kW, hour allowance 49.85 kWh.
+- **Plausibility check:** an hour can never exceed what the main fuse delivers
+  (√3 × 230 V × fuse current, +10 %; 32 A ≈ 14 kWh/h).
+  - An implausible hour right after missing hours is spread evenly over the gap.
+  - Power Controller's own fully measured hours are kept (per month, persisted) and replace an
+    implausible statistics hour or fill a missing one.
+  - An implausible hour that cannot be explained counts for energy and cost, but not for daily
+    peaks / top-3 / capacity step.
+  - Start-up hours (observed only partly) are never trusted as peaks.
+- Stored peaks from 2.11.0 above the fuse limit are dropped at start-up and the active step is
+  re-derived; the statistics rebuild then gives the exact month.
+- The Month-to-date KPI shows how many hours were corrected; a warning with the details is written
+  to the log.
+- `manifest.json`: `after_dependencies: [recorder]` (hassfest).
+
+### Tests
+- 5 new tests (111 total): fuse limit, lumped hours after gaps (the reported case), implausible
+  hour without gap, own measured hours replacing/filling statistics, partial start-up hours.
+
 ## 2.11.0
 
 ### Energy this hour, month to date, top-3 and Norgespris (bug fix)
