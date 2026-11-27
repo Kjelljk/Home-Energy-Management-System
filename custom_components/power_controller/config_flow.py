@@ -56,6 +56,9 @@ from .const import (
     CONF_WATER_TEMP_SENSOR,
     CONF_WEATHER_ENTITY,
     CONF_WINDOW_SENSOR,
+    CONF_VOLTAGE_L12_SENSOR,
+    CONF_VOLTAGE_L23_SENSOR,
+    CONF_VOLTAGE_L31_SENSOR,
     CONF_WORKDAY_SENSOR,
     CONF_ZONE_AREA_M2,
     CONF_ZONE_ID,
@@ -83,6 +86,33 @@ from .grid_tariff import (
 )
 
 
+def _opt(key: str, d: dict[str, Any]) -> vol.Optional:
+    """Optional entity field. Home Assistant rejects ``default=None`` for entity selectors,
+    which made e.g. the window sensor effectively mandatory. Existing values are shown as a
+    suggestion instead, and the field can be left empty."""
+    val = d.get(key)
+    return vol.Optional(key, description={"suggested_value": val}) if val else vol.Optional(key)
+
+
+def _cleared(schema: vol.Schema, user_input: dict[str, Any]) -> dict[str, Any]:
+    """Options flows: an optional field the user emptied is missing from user_input. Store it
+    explicitly as None so it overrides the original value in entry.data."""
+    out = dict(user_input)
+    for key in schema.schema:
+        name = str(key)
+        if isinstance(key, vol.Optional) and name not in out:
+            out[name] = None
+    return out
+
+
+def _entity_summary(d: dict[str, Any]) -> str:
+    """Selected entities with their full entity_id (shown above the form so similar
+    friendly names cannot be confused)."""
+    rows = [f"- {k.replace('_', ' ')}: `{v}`" for k, v in sorted(d.items())
+            if isinstance(v, str) and "." in v and " " not in v and k not in ("name",)]
+    return "Selected entities:\n" + "\n".join(rows) if rows else "No entities selected yet."
+
+
 def _hub_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
     d = defaults or {}
     return vol.Schema(
@@ -105,19 +135,19 @@ def _hub_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             vol.Required(CONF_NORDPOOL_SENSOR, default=d.get(CONF_NORDPOOL_SENSOR)): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
-            vol.Optional(
-                CONF_WORKDAY_SENSOR,
-                default=d.get(CONF_WORKDAY_SENSOR, "binary_sensor.workday_sensor"),
-            ): selector.EntitySelector(selector.EntitySelectorConfig(domain="binary_sensor")),
+            _opt(CONF_WORKDAY_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="binary_sensor")),
             vol.Required(CONF_OUTDOOR_TEMP_SENSOR, default=d.get(CONF_OUTDOOR_TEMP_SENSOR)): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
-            vol.Optional(CONF_WEATHER_ENTITY, default=d.get(CONF_WEATHER_ENTITY)): selector.EntitySelector(
+            _opt(CONF_WEATHER_ENTITY, d): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="weather")
             ),
-            vol.Optional(CONF_EXTERNAL_LIMIT_SENSOR, default=d.get(CONF_EXTERNAL_LIMIT_SENSOR)): selector.EntitySelector(
+            _opt(CONF_EXTERNAL_LIMIT_SENSOR, d): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
+            _opt(CONF_VOLTAGE_L12_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+            _opt(CONF_VOLTAGE_L23_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+            _opt(CONF_VOLTAGE_L31_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
             vol.Optional(
                 CONF_SENSOR_TIMEOUT_S, default=d.get(CONF_SENSOR_TIMEOUT_S, SENSOR_STALE_DEFAULT_S)
             ): selector.NumberSelector(selector.NumberSelectorConfig(min=10, max=900, step=10, mode="box")),
@@ -170,7 +200,7 @@ def _zone_schema(defaults: dict[str, Any] | None = None) -> vol.Schema:
             ): selector.SelectSelector(
                 selector.SelectSelectorConfig(options=[c.value for c in InsulationClass], mode="dropdown")
             ),
-            vol.Optional(CONF_WINDOW_SENSOR, default=d.get(CONF_WINDOW_SENSOR)): selector.EntitySelector(
+            _opt(CONF_WINDOW_SENSOR, d): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="binary_sensor")
             ),
         }
@@ -228,7 +258,7 @@ def _device_schema(
                 vol.Required(CONF_ROOM_TEMP_SENSOR, default=d.get(CONF_ROOM_TEMP_SENSOR)): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 ),
-                vol.Optional(CONF_POWER_SENSOR, default=d.get(CONF_POWER_SENSOR)): selector.EntitySelector(
+                _opt(CONF_POWER_SENSOR, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 ),
                 vol.Required(CONF_PHASE_PAIR, default=d.get(CONF_PHASE_PAIR, PhasePair.L1_L2)): phase_sel,
@@ -247,7 +277,7 @@ def _device_schema(
                 vol.Required(CONF_OOT_TEMP_ENTITY, default=d.get(CONF_OOT_TEMP_ENTITY)): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["number", "input_number"])
                 ),
-                vol.Optional(CONF_SCHEDULE_ENTITY, default=d.get(CONF_SCHEDULE_ENTITY)): selector.EntitySelector(
+                _opt(CONF_SCHEDULE_ENTITY, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="schedule")
                 ),
                 vol.Required(
@@ -274,28 +304,28 @@ def _device_schema(
                 vol.Required(CONF_TARGET_ENTITY, default=d.get(CONF_TARGET_ENTITY)): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["climate", "switch"])
                 ),
-                vol.Optional(CONF_WATER_TEMP_SENSOR, default=d.get(CONF_WATER_TEMP_SENSOR)): selector.EntitySelector(
+                _opt(CONF_WATER_TEMP_SENSOR, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 ),
-                vol.Optional(CONF_POWER_SENSOR, default=d.get(CONF_POWER_SENSOR)): selector.EntitySelector(
+                _opt(CONF_POWER_SENSOR, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="sensor")
                 ),
                 vol.Required(CONF_PHASE_PAIR, default=d.get(CONF_PHASE_PAIR, PhasePair.L2_L3)): phase_sel,
                 vol.Required(CONF_NOMINAL_CURRENT_A, default=d.get(CONF_NOMINAL_CURRENT_A, 8.7)): float,
                 vol.Required(CONF_NOMINAL_POWER_KW, default=d.get(CONF_NOMINAL_POWER_KW, 2.0)): float,
                 vol.Optional(CONF_HEATING_COEFFICIENT, default=d.get(CONF_HEATING_COEFFICIENT, 1.0)): float,
-                vol.Optional(CONF_NOMINAL_TEMP_ENTITY, default=d.get(CONF_NOMINAL_TEMP_ENTITY)): selector.EntitySelector(
+                _opt(CONF_NOMINAL_TEMP_ENTITY, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["number", "input_number"])
                 ),
-                vol.Optional(CONF_MIN_TEMP_ENTITY, default=d.get(CONF_MIN_TEMP_ENTITY)): selector.EntitySelector(
+                _opt(CONF_MIN_TEMP_ENTITY, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["number", "input_number"])
                 ),
-                vol.Optional(CONF_OOT_TEMP_ENTITY, default=d.get(CONF_OOT_TEMP_ENTITY)): selector.EntitySelector(
+                _opt(CONF_OOT_TEMP_ENTITY, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["number", "input_number"])
                 ),
                 vol.Optional(CONF_DAILY_QUOTA_HOURS, default=d.get(CONF_DAILY_QUOTA_HOURS, 3.0)): float,
                 vol.Optional(CONF_TANK_VOLUME_L, default=d.get(CONF_TANK_VOLUME_L, 200.0)): float,
-                vol.Optional(CONF_SCHEDULE_ENTITY, default=d.get(CONF_SCHEDULE_ENTITY)): selector.EntitySelector(
+                _opt(CONF_SCHEDULE_ENTITY, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain="schedule")
                 ),
             }
@@ -308,12 +338,12 @@ def _device_schema(
             vol.Required(CONF_TARGET_ENTITY, default=d.get(CONF_TARGET_ENTITY)): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="switch")
             ),
-            vol.Optional(CONF_POWER_SENSOR, default=d.get(CONF_POWER_SENSOR)): selector.EntitySelector(
+            _opt(CONF_POWER_SENSOR, d): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="sensor")
             ),
             vol.Required(CONF_PHASE_PAIR, default=d.get(CONF_PHASE_PAIR, PhasePair.L1_L2)): phase_sel,
             vol.Required(CONF_NOMINAL_POWER_KW, default=d.get(CONF_NOMINAL_POWER_KW, 1.5)): float,
-            vol.Optional(CONF_SCHEDULE_ENTITY, default=d.get(CONF_SCHEDULE_ENTITY)): selector.EntitySelector(
+            _opt(CONF_SCHEDULE_ENTITY, d): selector.EntitySelector(
                 selector.EntitySelectorConfig(domain="schedule")
             ),
         }
@@ -444,11 +474,14 @@ class PowerControllerOptionsFlow(OptionsFlow):
         merged = {**self._entry.data, **self._entry.options}
         etype = merged.get("entry_type", ENTRY_TYPE_HUB)
         if etype == ENTRY_TYPE_HUB:
-            return self.async_show_menu(step_id="init", menu_options=["hub_settings", "occupancy", "grid_tariff"])
-        if user_input is not None:
-            return self.async_create_entry(title="", data=user_input)
+            return self.async_show_menu(step_id="init", menu_options=["hub_settings", "occupancy", "grid_tariff"],
+                                        description_placeholders={"current": ""})
         if etype == ENTRY_TYPE_ZONE:
-            return self.async_show_form(step_id="init", data_schema=_zone_schema(merged))
+            schema = _zone_schema(merged)
+            if user_input is not None:
+                return self.async_create_entry(title="", data=_cleared(schema, user_input))
+            return self.async_show_form(step_id="init", data_schema=schema,
+                                        description_placeholders={"current": _entity_summary(merged)})
 
         dtype = DeviceType(merged[CONF_DEVICE_TYPE])
         zone_opts: list[selector.SelectOptionDict] = []
@@ -459,13 +492,19 @@ class PowerControllerOptionsFlow(OptionsFlow):
         if not zone_opts:
             zone_opts = [{"value": "default_zone", "label": "Main Living Zone"}]
         merged.setdefault("name", self._entry.title)
-        return self.async_show_form(step_id="init", data_schema=_device_schema(dtype, zone_opts, merged))
+        schema = _device_schema(dtype, zone_opts, merged)
+        if user_input is not None:
+            return self.async_create_entry(title="", data=_cleared(schema, user_input))
+        return self.async_show_form(step_id="init", data_schema=schema,
+                                    description_placeholders={"current": _entity_summary(merged)})
 
     async def async_step_hub_settings(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         merged = {**self._entry.data, **self._entry.options}
+        schema = _hub_schema(merged)
         if user_input is not None:
-            return self.async_create_entry(title="", data={**self._entry.options, **user_input})
-        return self.async_show_form(step_id="hub_settings", data_schema=_hub_schema(merged))
+            return self.async_create_entry(title="", data={**self._entry.options, **_cleared(schema, user_input)})
+        return self.async_show_form(step_id="hub_settings", data_schema=schema,
+                                    description_placeholders={"current": _entity_summary(merged)})
 
     async def async_step_occupancy(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Recurring home-office weekdays. Clock times are time entities on the hub device;

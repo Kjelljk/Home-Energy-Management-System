@@ -2,107 +2,114 @@
 
 # Power Controller (Home Assistant)
 
-> ⚠️ **Work in progress – not yet tested in a real Home Assistant instance.**
-> The calculation and planning engines are covered by unit tests. The integration layer
-> and the frontend have been checked with stubs/mocks only.
+> ⚠️ **Work in progress.** The calculation and planning engines are covered by unit tests. The
+> Home Assistant layer and the frontend have been checked with stubs/mocks; verify in your own
+> installation before you let it control many devices.
 
-Home energy management for a Norwegian household on a 230 V IT grid. The integration plans
-and controls EV charging, water heaters, panel heaters/heat pumps and switches so that the
-total cost of **electricity + grid tariff** is minimised without exceeding the selected
-capacity step or the main fuse / phase current limits.
+Power Controller is a home energy management system (HEMS) for a Norwegian household on a
+230 V IT grid. It decides **when** controllable loads (heat pumps, panel heaters, floor heating,
+water heater, EV charger, switches) should use power, and **how much** they may use right now,
+so that the total cost of **electricity + grid tariff** is as low as possible while keeping
+comfort and staying within the capacity step and the main fuse / phase currents.
 
-## Features
-- **Price models:** Norgespris (fixed state price), spot with electricity support
-  (strømstøtte), or plain spot. Missing spot prices are forecast from the same weekday last
-  week, scaled to today's price level.
-- **Editable grid tariff:** price-list versions with a valid-from date, time-of-use periods
-  (weekdays, hours, months), fees, VAT handling, holiday rule and capacity steps – all
-  edited in the UI. Templates (e.g. BKK 2026) are only starting points.
-- **72-hour plan:** linear optimisation (HiGHS) with a thermal model per zone, pre-heating,
-  EV deadlines, legionella cycle and switch runtimes.
-- **Real-time distribution** every 10 s by priority and plan, with lending of unused capacity.
-- **Cost-neutral hourly limit:** uses today's peak and the month's top-3 rule (kapasitetsledd).
-- **Overload acceptance:** small overloads are tolerated longer than large ones, then the
-  limit ramps down to the rated current.
-- **Occupancy-based planning:** expected wake/leave/return/bedtimes for workdays and days off.
-  Each heater chooses when it needs comfort (home & awake, home office, night).
-- **Home office days:** one-tap *Home Office Today/Tomorrow* switches, recurring weekdays and a
-  `set_home_office` service for several days.
-- **Shadow evaluation (Norgespris vs. spot):** a second, non-controlling planner optimises
-  for spot prices so you can see over time whether leaving Norgespris would lower the bill.
-- **Object card** for normal dashboards and an **admin overview panel** in the sidebar.
-  Both follow your Home Assistant theme (also custom themes).
-- All settings survive a restart. Norwegian public holidays are built in.
+## How it works – three modules
 
-## Installation
-1. HACS → Custom repositories → add this repository (category *Integration*).
-   Alternatively copy `custom_components/power_controller` to `/config/custom_components/`.
-2. Restart Home Assistant.
-3. *Settings → Devices & services → Add integration → Power Controller.*
-   The first entry is the hub (grid sensors). Then add thermal zones and one entry per load.
-4. *Configure → Grid tariff:* verify prices and capacity steps against your grid operator's
-   price list.
+![Modules](docs/img/architecture.svg)
 
-Requires `numpy` and `scipy` (installed automatically by Home Assistant from `manifest.json`).
+| Module | Runs | Question it answers | Main output |
+|---|---|---|---|
+| **1 · Price** | hourly and when new prices arrive | What does one kWh cost in each of the next 72 hours? | all-in price per hour, hour allowance (capacity step) |
+| **2 · Plan** | hourly at :59 and on every change | When should each device use energy, given prices, comfort and limits? | kWh per hour and setpoint per device for 72 h |
+| **3 · Distribution** | every 10 seconds | How much may each device use *right now* without exceeding the hour or a phase? | power per device, actuation of the devices |
 
-## Overload acceptance (defaults)
-| Overload | Tolerated before ramp-down | Ramp-down to rated current |
-|---|---|---|
-| 5 % | 10 min | 10 min |
-| 20 % | 2 min | 5 min |
-| ≥ 50 % | 0 (immediate) | – |
+A fourth background part learns the thermal behaviour of each room, tracks the legionella cycle,
+records **plan vs. actual** and runs the **Norgespris vs. spot** shadow evaluation.
 
-The budget refills in 20 min below 80 % load and in 60 min at 100 % load. All values can be
-changed under *Configure → Sensors and general settings*. Per-phase status is available as
-an attribute on `binary_sensor.power_controller_warning`.
+### 1 · Price
+![Price module](docs/img/price.svg)
+
+- **Price model:** Norgespris (fixed price up to the monthly volume, spot above it), spot with
+  electricity support (strømstøtte) or plain spot. Missing spot hours are forecast from the same
+  weekday last week, scaled to today's level.
+- **Grid tariff:** fully editable in the UI – price-list versions with a valid-from date,
+  time-of-use periods (weekdays, hours, months), fees, VAT and capacity steps.
+- **Capacity charge:** the average of the three highest hourly peaks on three different days.
+  The hour allowance uses peaks that are already "paid for" this month.
+- **Norgespris remaining:** used/remaining volume this month and the projected date it runs out.
+- **Shadow evaluation:** prices the same consumption on spot, and what an optimiser planning for
+  spot would have paid – so you can see whether Norgespris is actually cheaper for you.
+
+### 2 · Plan
+![Plan module](docs/img/plan.svg)
+
+- A linear optimisation (HiGHS) over 72 hours with a self-learning temperature model per room,
+  pre-heating, EV deadlines, hot-water tank/quota, legionella and switch runtimes.
+- **All controllable devices are included.** Devices that are *not committed* (not controlled) are
+  added as a flat, never-shifted forecast so the plan and limits reflect the real consumption:
+  heating holds its own setpoint, hot water/switches use their daily amount spread over the day,
+  and an EV only counts when it is connected **and** actually charging.
+- **When are we home?** The times on the Power Controller device (wake, leave, return, bedtime)
+  build the schedule. A device can optionally use its own *schedule* helper instead.
+- **Mode** (Home / Away / Arriving) is the long-term picture: Away uses out-of-town temperatures,
+  Arriving pre-heats to the arrival time.
+- **Occupancy** (select) is the situation *now*: Home and awake, Sleeping, Away (work),
+  Home office. Set it yourself or from your own automation. It decides the current hour(s);
+  the schedule decides the later hours. Rules:
+  - while the selector says *Home and awake*, rooms that need comfort are never lowered, even if
+    the schedule says bedtime;
+  - *Away (work)* after the scheduled return keeps the house warm (you may arrive any minute);
+  - Mode *Away* ignores the selector.
+
+### 3 · Distribution
+![Distribution module](docs/img/distribution.svg)
+
+Every 10 seconds: **grid limiter** (main fuse, internal/external per phase) → **tariff limiter**
+(kWh left this hour) → **overload acceptance** (5 % for 10 min, 20 % for 2 min, ≥ 50 % at once,
+then ramp to rated) → **distribution**. Baseload and devices that are not committed are subtracted
+first. Only planned devices (or *Priority now*) get power; a reservation that is idle (thermostat
+satisfied) is lent to planned-but-blocked devices and taken back immediately when needed.
 
 ## Dashboards
 
-### Object card (for everyday dashboards)
-Loaded automatically by the integration – no Lovelace resource needed. Add a card of type
-**Power Controller object** in the dashboard editor (visual editor included), or in YAML:
+### Super-user panel (sidebar, admins)
+One page per module so it is clear what each part does:
+
+| Page | Content |
+|---|---|
+| **Overview** | *Now & history*: KPIs, power per device last hour, phase currents/voltages last 24 h, consumption 3 days back / 3 days ahead · *Plan*: next 24 h and the device list |
+| **Price** | price split (energy/grid), 72 h price, Norgespris volume and projection, grid tariff, Norgespris vs. spot |
+| **Plan** | 72 h plan (incl. forecast for uncommitted devices), occupancy selector and 7-day schedule, plan vs. actual |
+| **Distribution** | live flow grid → limiters → distribution → devices, incl. lending arrows, phases and the decision per device |
+| **Devices / Priorities** | object cards and drag-and-drop priority order |
+
+History comes from the Home Assistant recorder (no extra storage). Plan vs. actual keeps 7 days.
+
+### Object card (everyday dashboards)
+Loaded automatically – add **Power Controller object** in the dashboard editor or:
 
 ```yaml
 type: custom:power-controller-object-card
-entity: sensor.pc_heat_pump_plan        # the device's plan sensor
-control_entity: climate.heat_pump       # optional, auto-detected from the device setup
-show_plan: true                         # 24-hour plan strip + next action
-show_distribution: true                 # real-time distribution status line
-show_targets: true                      # comfort/eco, nominal temp, runtime, EV target
+entity: sensor.pc_heat_pump_plan      # the device's plan sensor
+show_plan: true                       # 24 h strip: kWh per hour (bars) + setpoint °C (line), tap for values
+show_distribution: true               # live status from the distribution module
+show_targets: true                    # comfort/eco, nominal temp, runtime, EV target
 ```
 
-- **Committed:** status line from the real-time distribution (Running, Idle · capacity lent,
-  Waiting, Blocked, Shedding, Priority now), 24-hour plan, next action, target controls and
-  *Priority now*. Mode buttons are hidden so users don't fight the controller.
-- **Uncommitted:** a normal control card for the entity (HVAC modes, setpoint, presets,
-  fan/swing, water-heater operation, on/off).
-- Tap the badge to commit/uncommit; tap the icon or name for the more-info dialog.
-- See `docs/dashboard-example.yaml`.
+- **Committed:** distribution status, 24 h plan with axis and units, next action, targets,
+  *Priority now*, and – when an external room sensor regulates the device – an expandable
+  **Regulator** section (room temp, target, error, P and I terms, offset, setpoint sent).
+- **Uncommitted:** normal controls for the entity and the *forecast* the plan uses for it.
 
-### Overview panel (super user)
-**Power Controller** appears in the sidebar for administrators: KPIs, 72-hour plan with prices,
-phases and overload acceptance, all devices, occupancy with home-office toggles, Norgespris vs.
-spot and the grid tariff. Tabs *Devices* (all object cards) and *Priorities* (drag to reorder).
+## Installation
+1. HACS → add this repository (category *Integration*) → install, restart Home Assistant.
+2. *Settings → Devices & services → Add integration → Power Controller.* The first entry is the
+   hub (grid meter, phase currents, Nord Pool, outdoor temperature; optional: weather, external
+   limiter, phase voltages). Then add thermal zones (window sensor optional) and one entry per load.
+3. *Configure → Grid tariff:* check prices and capacity steps against your grid operator.
+4. Set the times on the Power Controller device and connect your own presence/sleep logic to the
+   **Occupancy** select.
 
-## Occupancy and home office
-When the house is not in *Away* (out of town) mode, comfort temperatures follow the expected
-occupancy instead of a fixed schedule: `home_awake`, `away_work`, `home_office`, `sleep`.
-
-- **Times:** six time entities on the Power Controller device (workday wake/leave/return/bedtime,
-  day-off wake/bedtime). Days off = weekends, Norwegian public holidays and the workday sensor.
-- **Per heater:** *Comfort temperature during* (home & awake / home office / night). Outside
-  these states the eco temperature applies; the planner pre-heats so rooms are warm in time.
-- **Home office:** `switch.power_controller_home_office_today` / `_tomorrow`, recurring weekdays
-  under *Configure → Home office weekdays*, or `power_controller.set_home_office`.
-- `sensor.power_controller_occupancy` shows the current state and the next 72 hours.
-
-## Shadow evaluation (Norgespris vs. spot)
-Runs next to the real controller and never switches anything. Each hour is priced as *actual*,
-*passive spot* (same usage on spot) and *optimised spot* (a second planner optimising for spot).
-The shadow carries its own room/tank temperatures and EV energy forward, so it cannot "save"
-by being colder or charging less. Sensor: `sensor.power_controller_norgespris_benefit_this_month`
-(positive = Norgespris is cheaper). Settings: *Shadow Comparison Model*, *Shadow Extra Monthly Fee*.
-Service: `power_controller.reset_shadow_evaluation`.
+Requires `numpy` and `scipy` (installed automatically).
 
 ## Development
 See [`docs/PROJECT_HANDOVER.md`](docs/PROJECT_HANDOVER.md) for architecture, design decisions,

@@ -12,6 +12,7 @@ from .const import (
     DOMAIN,
     ENTRY_TYPE_HUB,
     GridMode,
+    OCCUPANCY_LABELS,
     PRICE_MODEL_LABELS,
     PriceModel,
     PriorityProfile,
@@ -35,6 +36,7 @@ async def async_setup_entry(
             HubPriorityProfileSelect(coordinator),
             HubPriceModelSelect(coordinator),
             HubShadowModelSelect(coordinator),
+            HubOccupancySelect(coordinator),
         ]
     )
 
@@ -161,3 +163,37 @@ class HubShadowModelSelect(_HubBaseSelect):
     async def async_select_option(self, option: str) -> None:
         model = next(k for k, v in SHADOW_MODEL_LABELS.items() if v == option)
         await self.coordinator.async_set_shadow_model(model)
+
+
+class HubOccupancySelect(_HubBaseSelect):
+    """The CURRENT situation (home and awake / sleeping / away at work / home office).
+
+    Meant to be set by the user or by an automation (e.g. a presence/sleep function). It stays
+    until changed. Mode (Home/Away/Arriving) is separate: Away ignores this selector.
+    The planner uses it for the current hour(s); the time schedule is used for later hours.
+    """
+
+    _attr_icon = "mdi:account-clock"
+    _attr_options = list(OCCUPANCY_LABELS.values())
+
+    def __init__(self, coordinator: PowerControllerCoordinator) -> None:
+        super().__init__(coordinator, "occupancy_select", "Occupancy")
+
+    @property
+    def current_option(self) -> str | None:
+        return OCCUPANCY_LABELS.get(self.coordinator.occupancy_selected or "")
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "state_key": self.coordinator.occupancy_selected,
+            "scheduled_now": self.coordinator.occupancy_scheduled_now(),
+            "effective_now": self.coordinator.occupancy_state_now(),
+            "ignored": self.coordinator.mode == GridMode.AWAY,
+        }
+
+    async def async_select_option(self, option: str) -> None:
+        key = next((k for k, v in OCCUPANCY_LABELS.items() if v == option or k == option), None)
+        if key is None:
+            raise ValueError(option)
+        await self.coordinator.async_set_occupancy(key)

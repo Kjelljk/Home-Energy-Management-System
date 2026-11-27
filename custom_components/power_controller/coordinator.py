@@ -96,7 +96,7 @@ from .planner import EnergyPlanner, PlanResult
 from .grid_tariff import GridTariffSchedule
 from .price_engine import EnergyPriceEngine, PriceSeries72h, build_workday_mask, is_norwegian_workday
 from .card_model import next_action, plan_index, plan_window, ui_status, value_at
-from .occupancy import OccupancyProfile
+from .occupancy import OCC_SELECT_OPTIONS, OccupancyProfile, apply_selector, effective_state
 from .shadow import ShadowEvaluator
 from .storage import PowerControllerStore
 from .thermodynamics import ThermalZoneModel, seed_thermal_parameters
@@ -143,6 +143,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.occupancy = OccupancyProfile()
         self.occ_hour_states: list[set[str]] = []
         self.occ_start: datetime | None = None
+        # current situation from the Occupancy select (set by the user/an automation);
+        # None until first set -> initialised from the schedule at start-up
+        self.occupancy_selected: str | None = None
+        # plan vs. actual per finished hour (7 days)
+        self.plan_history: list[dict] = []
         self.arrival_time: datetime | None = None
         self.departure_time: datetime | None = None
         self.committed: dict[str, bool] = {}
@@ -209,6 +214,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.price_engine.active_tariff_kw = float(saved.get("active_tariff_kw", 5.0))
         self.price_engine.spot_history = dict(saved.get("spot_history", {}))
         self.shadow = ShadowEvaluator.from_dict(saved.get("shadow"))
+        self.plan_history = list(saved.get("plan_history", []))[-168:]
         for zid, zdata in saved.get("thermal_zones", {}).items():
             self.zones[zid] = ThermalZoneModel.from_dict(zdata)
         self._restore_settings(saved.get("settings", {}))
@@ -299,6 +305,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.target_soc.update({k: float(v) for k, v in rt.get("target_soc", {}).items()})
         self.finish_by.update({k: _dt(v) for k, v in rt.get("finish_by", {}).items()})
         self.runtime_hours.update({k: float(v) for k, v in rt.get("runtime_hours", {}).items()})
+        sel = rt.get("occupancy_selected")
+        self.occupancy_selected = sel if sel in OCC_SELECT_OPTIONS else None
 
     def _collect_store_data(self) -> dict[str, Any]:
         now = dt_util.now()
@@ -332,10 +340,12 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "target_soc": dict(self.target_soc),
             "finish_by": {k: iso(v) for k, v in self.finish_by.items()},
             "runtime_hours": dict(self.runtime_hours),
+            "occupancy_selected": self.occupancy_selected,
         }
         d["hour"] = {"key": self._hour_key, "meter_start": self._hour_start_meter_kwh,
                      "device_kwh": dict(self._hour_dev_kwh)}
         d["shadow"] = self.shadow.to_dict()
+        d["plan_history"] = self.plan_history[-168:]
         d["day_counters"] = {"day": self._day_key, "energy": self._day_energy_kwh, "runtime": self._day_runtime_h}
         return d
 
@@ -543,11 +553,29 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _update_occupancy(self, start: datetime) -> None:
         self.occupancy.prune(start.date())
-        self.occ_hour_states = self.occupancy.hour_states(start, self.is_workday, PLANNING_HORIZON_HOURS)
+        if self.occupancy_selected is None:   # first start: begin in the schedule's state
+            self.occupancy_selected = self.occupancy.state_at(dt_util.now(), self.is_workday)
+        states = self.occupancy.hour_states(start, self.is_workday, PLANNING_HORIZON_HOURS)
+        # Mode Away (out of town) ignores the selector; otherwise it decides the current hour(s)
+        if self.mode != GridMode.AWAY:
+            states = apply_selector(states, self.occupancy_selected)
+        self.occ_hour_states = states
         self.occ_start = start
 
-    def occupancy_state_now(self) -> str:
+    def occupancy_scheduled_now(self) -> str:
         return self.occupancy.state_at(dt_util.now(), self.is_workday)
+
+    def occupancy_state_now(self) -> str:
+        """Effective occupancy now: selector combined with the schedule (see occupancy.effective_state)."""
+        if self.mode == GridMode.AWAY:
+            return "out_of_town"
+        return effective_state(self.occupancy_selected, self.occupancy_scheduled_now())
+
+    async def async_set_occupancy(self, state: str) -> None:
+        if state not in OCC_SELECT_OPTIONS:
+            raise ValueError(state)
+        self.occupancy_selected = state
+        await self.async_settings_changed()
 
     async def async_set_home_office(self, day, enabled: bool) -> None:
         """Quick override: e.g. 'tomorrow I work from home'. Replans immediately."""
@@ -593,6 +621,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         prev_hour = now - timedelta(hours=1)
         price_prev = self.price_series.total_price_72h[0] if self.price_series else 0.0
         self._close_shadow_hour(prev_hour)
+        self._record_plan_history(prev_hour)
         stepped_up = self.price_engine.record_hourly_consumption(prev_hour, self.energy_this_hour_kwh, price_prev)
         if now.day == 1 and now.hour == 0:
             self.price_engine.reset_monthly_counters()
@@ -775,6 +804,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 oot_temp=self._read_float(d.get(CONF_OOT_TEMP_ENTITY)) or 10.0,
                 target_temps_72h=[comfort if m else eco for m in mask],
                 eco_temp=eco,
+                # used when NOT committed: the device's own setpoint decides its consumption
+                hold_setpoint=self._climate_setpoint(d.get(CONF_TARGET_ENTITY)),
             )
         elif dtype == DeviceType.CLIMATE_HOTWATER:
             nom_t = self._read_float(d.get(CONF_NOMINAL_TEMP_ENTITY)) or 65.0
@@ -799,6 +830,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             need = max(0.0, (tgt - (soc if soc is not None else 50.0)) / 100.0 * cap_kwh)
             spec.update(
                 connected=connected, energy_needed_kwh=need,
+                live_power_kw=self.get_device_live_power_kw(eid),
+                # a session only counts as charging when power actually flows
+                charging=connected and self.get_device_live_power_kw(eid) > 0.5,
                 min_power_kw=float(d.get(CONF_EV_MIN_CURRENT_A, 6)) * 230.0 / 1000.0,
                 finish_by=self.finish_by.get(eid),
             )
@@ -869,6 +903,25 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
         except Exception:  # noqa: BLE001
             _LOGGER.exception("Shadow bookkeeping failed")
+
+    def _record_plan_history(self, hour_ts: datetime) -> None:
+        """Plan vs. actual for the finished hour (kept 7 days) – the plan that was valid for it."""
+        try:
+            hour_ts = hour_ts.replace(minute=0, second=0, microsecond=0)
+            idx = plan_index(self.plan_start, hour_ts) if self.plan_start else None
+            planned = {eid: value_at(p, idx) for eid, p in self.plans_72h.items()} if idx is not None else {}
+            self.plan_history.append({
+                "ts": hour_ts.isoformat(),
+                "planned_kwh": round(sum(float(v or 0.0) for v in planned.values())
+                                     + float(value_at(self.baseload_72h, idx or 0) or 0.0), 3),
+                "actual_kwh": round(self.energy_this_hour_kwh, 3),
+                "devices": {eid: [round(float(planned.get(eid) or 0.0), 3), round(self._hour_dev_kwh.get(eid, 0.0), 3)]
+                            for eid in self.device_entries},
+                "price": round(float(self.price_series.total_price_72h[0]), 4) if self.price_series else None,
+            })
+            self.plan_history = self.plan_history[-168:]
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Plan history bookkeeping failed")
 
     async def async_set_shadow_model(self, model: str) -> None:
         self.shadow.shadow_model = model
@@ -1019,6 +1072,17 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         elif dtype == DeviceType.SWITCH:
             await self._actuate_switch(now, eid, target, allowed, force=self.warning_active and not allowed)
 
+    def _climate_setpoint(self, entity_id: str | None) -> float | None:
+        st = self.hass.states.get(entity_id) if entity_id else None
+        if st is None or st.state in ("unavailable", "unknown"):
+            return None
+        if st.state == "off":
+            return -100.0   # switched off -> no consumption in the forecast
+        try:
+            return float(st.attributes.get("temperature"))
+        except (TypeError, ValueError):
+            return None
+
     def plan_idx(self, now: datetime | None = None) -> int:
         """Index of the current hour in plans made at xx:59 (fixes the <=2.5.0 off-by-one)."""
         return plan_index(self.plan_start, now or dt_util.now())
@@ -1044,14 +1108,19 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         desired = self._planned_setpoint(eid)
         if desired is None:
             desired = oot if self.mode == GridMode.AWAY else (self._read_float(d.get(CONF_COMFORT_TEMP_ENTITY)) or 21.0)
+        # never lower the room below comfort while the occupancy selector says we are in a
+        # state this room needs comfort for (e.g. still home and awake after the scheduled bedtime)
+        comfort_states = d.get(CONF_COMFORT_DURING) or ["home_awake", "home_office"]
+        if self.mode != GridMode.AWAY and self.occupancy_state_now() in comfort_states:
+            comfort = self._read_float(d.get(CONF_COMFORT_TEMP_ENTITY))
+            if comfort is not None:
+                desired = max(desired, comfort)
         if setback:
-            desired = min(desired, eco)
+            desired = min(desired, eco)   # capacity/phase protection still wins
         elif d.get(CONF_ENABLE_PI_GOVERNOR):
             room = self._read_float(d.get(CONF_ROOM_TEMP_SENSOR))
             if room is not None:
-                desired = self.distributor.compute_heatpump_governor_setpoint(
-                    d.get(CONF_ZONE_ID, eid), desired, room, 10.0
-                )
+                desired = self.distributor.compute_heatpump_governor_setpoint(eid, desired, room, 10.0)
         await self._set_climate(now, eid, entity, desired, force=setback and self.warning_active)
 
     async def _actuate_hotwater(self, now, eid, d, entity, allowed: bool, setback: bool) -> None:
@@ -1301,6 +1370,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "unmet": self.plan_result.unmet.get(eid),
             "energy_today_kwh": round(self._day_energy_kwh.get(eid, 0.0), 3),
             "entities": entities,
+            "forecast_only": eid in self.plan_result.forecast_only,
+            "governor": self.distributor.pi_diag.get(eid) if d.get(CONF_ENABLE_PI_GOVERNOR) else None,
+            "governor_enabled": bool(d.get(CONF_ENABLE_PI_GOVERNOR)),
             **extra,
         }
 
@@ -1319,6 +1391,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         price_now: dict[str, Any] = {}
         prices_72h: list[float | None] = []
         spot_72h: list[float | None] = []
+        energy_72h: list[float | None] = []
         periods_72h: list[str | None] = []
         if ps is not None and ps.timestamps:
             off = int((start - ps.timestamps[0]).total_seconds() // 3600)
@@ -1329,6 +1402,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             prices_72h = aligned(ps.total_price_72h)
             vat = 1 + pe.vat_percent / 100.0
             spot_72h = [None if v is None else round(v * vat, 4) for v in aligned(ps.raw_spot_72h)]
+            energy_72h = [None if v is None else round((v + pe.supplier_markup_nok) * vat, 4) for v in aligned(ps.spot_after_support_72h)]
             periods_72h = aligned(ps.grid_period_72h) if ps.grid_period_72h else []
             i = plan_index(ps.timestamps[0], now)
             if i < len(ps.total_price_72h):
@@ -1352,14 +1426,17 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                      for st in steps]
 
         occ_days = []
-        for offset in (0, 1):
+        for offset in range(7):
             day = (now + timedelta(days=offset)).date()
             base = today0 + timedelta(days=offset)
+            sw = None
+            if offset < 2:
+                sw = self.own_entity_id("switch", f"{self.hub_entry.entry_id}_home_office_{'today' if offset == 0 else 'tomorrow'}")
             occ_days.append({
                 "date": day.isoformat(),
                 "workday": self.is_workday(day),
                 "home_office": self.occupancy.is_home_office(day, True),
-                "switch": self.own_entity_id("switch", f"{self.hub_entry.entry_id}_home_office_{'today' if offset == 0 else 'tomorrow'}"),
+                "switch": sw,
                 "quarters": [self.occupancy.state_at(base + timedelta(minutes=15 * q), self.is_workday) for q in range(96)],
             })
 
@@ -1369,6 +1446,43 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             shadow = self.shadow.month_summary(pe)
             shadow["rolling_12_months"] = self.shadow.rolling_12m(pe)
 
+        cfg = self._hub_cfg()
+        from .const import (
+            CONF_VOLTAGE_L12_SENSOR, CONF_VOLTAGE_L23_SENSOR, CONF_VOLTAGE_L31_SENSOR, OCCUPANCY_LABELS,
+        )
+        # live flow (distribution module): grid -> limiters -> distribution -> devices
+        oa = self.limiters.oa.snapshot()
+        committed_live = sum(self.get_device_live_power_kw(e) for e in self.device_entries if self.committed.get(e))
+        uncommitted_live = sum(self.get_device_live_power_kw(e) for e in self.device_entries if not self.committed.get(e))
+        flow = {
+            "grid_kw": round(self.grid_power_kw, 3),
+            "phase_a": {ph: round(self.phase_currents.get(ph, 0.0), 2) for ph in ("L1", "L2", "L3")},
+            "grid_limiter": {
+                "internal_a": self.limiters.internal_limit_a,
+                "external_a": self.limiters.external_limit_a,
+                "rated_a": rated,
+                "binding": "external" if (self.limiters.external_limit_a and self.limiters.external_limit_a
+                                          < self.limiters.internal_limit_a) else "internal",
+            },
+            "tariff_limiter": {
+                "hour_allowance_kwh": self.hour_allowance_kwh,
+                "energy_this_hour_kwh": round(self.energy_this_hour_kwh, 3),
+                "limit_now_kw": self.limit_now_kw,
+                "safe_mode": self.safe_mode_active,
+            },
+            "overload": oa,
+            "baseload_kw": round(max(0.0, self.grid_power_kw - committed_live - uncommitted_live), 3),
+            "uncommitted_kw": round(uncommitted_live, 3),
+            "committed_kw": round(committed_live, 3),
+            "distribution": self.distributor.last_summary,
+            "edges": self.distributor.last_edges,
+        }
+        history_entities = {
+            "grid_power": cfg.get(CONF_ACTIVE_POWER_SENSOR),
+            "currents": {ph: cfg.get(k) for ph, k in (("L1", CONF_CURRENT_L1_SENSOR), ("L2", CONF_CURRENT_L2_SENSOR), ("L3", CONF_CURRENT_L3_SENSOR))},
+            "voltages": {lbl: cfg.get(k) for lbl, k in (("L1-L2", CONF_VOLTAGE_L12_SENSOR), ("L2-L3", CONF_VOLTAGE_L23_SENSOR), ("L3-L1", CONF_VOLTAGE_L31_SENSOR))},
+            "devices": {eid: self.own_entity_id("sensor", f"{eid}_power") for eid in self.device_entries},
+        }
         devices = []
         for eid in self.device_entries:
             a = self.device_attributes(eid)
@@ -1376,14 +1490,27 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "entry_id", "name", "device_type", "committed", "priority_now", "plan_priority", "dist_priority",
                 "ui_status", "live_kw", "allocated_kw", "nominal_kw", "phase_pair", "next_action", "hold_remaining_s",
                 "current_temp", "comfort_temp", "eco_temp", "nominal_temp", "soc", "target_soc", "finish_by",
-                "runtime_required_h", "runtime_today_h", "energy_today_kwh", "entities")})
+                "runtime_required_h", "runtime_today_h", "energy_today_kwh", "entities", "forecast_only",
+                "governor", "governor_enabled", "dist_status", "dist_reason")})
             devices[-1]["plan_72h"] = self.plans_72h.get(eid)
 
         return {
             "now": now.isoformat(),
             "version": VERSION,
             "mode": self.mode.value,
-            "occupancy": "out_of_town" if self.mode == GridMode.AWAY else self.occupancy_state_now(),
+            "occupancy": self.occupancy_state_now(),
+            "occupancy_selected": self.occupancy_selected,
+            "occupancy_scheduled": self.occupancy_scheduled_now(),
+            "occupancy_labels": OCCUPANCY_LABELS,
+            "entities": {
+                "occupancy_select": self.own_entity_id("select", f"{self.hub_entry.entry_id}_occupancy_select"),
+                "mode_select": self.own_entity_id("select", f"{self.hub_entry.entry_id}_mode"),
+                "shadow_select": self.own_entity_id("select", f"{self.hub_entry.entry_id}_shadow_model"),
+            },
+            "norgespris": pe.norgespris_status(now, self.energy_this_hour_kwh),
+            "flow": flow,
+            "history_entities": history_entities,
+            "plan_history": self.plan_history[-168:],
             "price_model": PRICE_MODEL_LABELS.get(pe.price_model, str(pe.price_model)),
             "plan": {
                 "start": start.isoformat(),
@@ -1394,8 +1521,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "baseload_72h": self.baseload_72h,
                 "price_72h": prices_72h,
                 "spot_72h": spot_72h,
+                "energy_72h": energy_72h,
                 "grid_period_72h": periods_72h,
                 "hour_cap_72h": pe.hourly_cap_series_72h(start),
+                "uncontrolled_72h": self.plan_result.uncontrolled_72h,
+                "occupancy_72h": [OccupancyProfile.dominant_state(x) for x in self.occ_hour_states],
             },
             "kpi": {
                 "grid_power_kw": round(self.grid_power_kw, 3),

@@ -204,6 +204,36 @@ class EnergyPriceEngine:
             return 0.0
         return next_tier_above(mean3, version.step_uppers(), version.threshold_in_next_step)
 
+    def norgespris_status(self, now: datetime, energy_this_hour_kwh: float = 0.0) -> dict:
+        """Remaining Norgespris volume this month and when it is expected to run out
+        (linear projection from the average daily use so far this month)."""
+        import calendar
+
+        volume = float(self.norgespris_volume_kwh)
+        used = max(0.0, float(self.monthly_energy_kwh) + max(0.0, float(energy_this_hour_kwh)))
+        remaining = max(0.0, volume - used)
+        days_in_month = calendar.monthrange(now.year, now.month)[1]
+        elapsed_days = max(1.0 / 24.0, (now.day - 1) + (now.hour + now.minute / 60.0) / 24.0)
+        per_day = used / elapsed_days
+        projected = used + per_day * max(0.0, days_in_month - elapsed_days)
+        reach = None
+        if per_day > 0 and remaining > 0:
+            days_left = remaining / per_day
+            if elapsed_days + days_left < days_in_month:
+                reach = (now + timedelta(days=days_left)).date().isoformat()
+        elif remaining <= 0:
+            reach = now.date().isoformat()
+        return {
+            "active": self.price_model == PriceModel.NORGESPRIS,
+            "volume_kwh": round(volume, 1),
+            "used_kwh": round(used, 1),
+            "remaining_kwh": round(remaining, 1),
+            "used_pct": round(100.0 * used / volume, 1) if volume > 0 else 0.0,
+            "avg_per_day_kwh": round(per_day, 1),
+            "projected_month_kwh": round(projected, 0),
+            "projected_reach_date": reach,
+        }
+
     def reset_monthly_counters(self) -> None:
         self.daily_peaks.clear()
         self.monthly_energy_kwh = 0.0

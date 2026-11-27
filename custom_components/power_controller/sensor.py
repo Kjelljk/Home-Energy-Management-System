@@ -55,6 +55,7 @@ async def async_setup_entry(
                 HubGridTariffSensor(coordinator),
                 HubShadowBenefitSensor(coordinator),
                 HubOccupancySensor(coordinator),
+                HubNorgesprisRemainingSensor(coordinator),
                 HubMetricSensor(coordinator, "capacity_charge", "Capacity Charge This Month", "capacity_charge_nok", "NOK", SensorDeviceClass.MONETARY),
             ]
         )
@@ -388,3 +389,28 @@ class HubOccupancySensor(CoordinatorEntity[PowerControllerCoordinator], SensorEn
             "workday_times": occ.workday.__dict__,
             "day_off_times": occ.free_day.__dict__,
         }
+
+
+class HubNorgesprisRemainingSensor(CoordinatorEntity[PowerControllerCoordinator], SensorEntity):
+    """Remaining Norgespris volume this month (kWh) with a projection of when it runs out."""
+
+    _attr_native_unit_of_measurement = UnitOfEnergy.KILO_WATT_HOUR
+    _attr_icon = "mdi:gauge"
+
+    def __init__(self, coordinator: PowerControllerCoordinator) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{coordinator.hub_entry.entry_id}_norgespris_remaining"
+        self._attr_name = "Power Controller Norgespris Remaining"
+        self._attr_device_info = _hub_device_info(coordinator)
+
+    def _status(self) -> dict:
+        from homeassistant.util import dt as dt_util
+        return self.coordinator.price_engine.norgespris_status(dt_util.now(), self.coordinator.energy_this_hour_kwh)
+
+    @property
+    def native_value(self) -> float:
+        return self._status()["remaining_kwh"]
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return self._status()

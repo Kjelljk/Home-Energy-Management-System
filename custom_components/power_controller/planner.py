@@ -57,6 +57,10 @@ class PlanResult:
     solver: str = ""
     solve_ms: float = 0.0
     unmet: dict[str, float] = field(default_factory=dict)
+    # devices that are NOT committed: their expected consumption is forecast (flat profile,
+    # never shifted) and counted against the hourly/phase capacity of the committed devices
+    forecast_only: list[str] = field(default_factory=list)
+    uncontrolled_72h: list[float] = field(default_factory=list)
 
 
 class _Vars:
@@ -122,12 +126,21 @@ class EnergyPlanner:
         """Return {entry_id: 72h kW plan}. Details are kept in ``self.last_result``."""
         horizon = min(PLANNING_HORIZON_HOURS, len(prices_72h))
         result = PlanResult()
+        t_out_p = self._pad([float(x) for x in outdoor_temps_72h], horizon, 5.0)
+        away_m = self._away_mask(now, horizon, GridMode(mode), arrival_time, departure_time)
         committed: list[dict] = []
+        uncontrolled = [0.0] * horizon
         for dev in devices:
             if dev.get("committed", False):
                 committed.append(dev)
             else:
-                result.plans[dev["entry_id"]] = [None] * horizon
+                prof = self.uncontrolled_profile(dev, now, horizon, t_out_p, away_m)
+                result.plans[dev["entry_id"]] = prof
+                result.forecast_only.append(dev["entry_id"])
+                uncontrolled = [u + p for u, p in zip(uncontrolled, prof)]
+        result.uncontrolled_72h = [round(u, 3) for u in uncontrolled]
+        # uncommitted devices behave like extra baseload for the optimisation
+        baseload_72h = [float(b) + u for b, u in zip(self._pad([float(x) for x in baseload_72h], horizon, 0.5), uncontrolled)]
 
         if not committed:
             self.last_result = result
@@ -155,7 +168,8 @@ class EnergyPlanner:
             self._solve_lp(result, **ctx)
             result.solver = "lp"
         except Exception:  # noqa: BLE001 – never leave the house without a plan
-            result = PlanResult(plans={k: v for k, v in result.plans.items() if v and v[0] is None})
+            result = PlanResult(plans={k: v for k, v in result.plans.items() if k in result.forecast_only},
+                                forecast_only=list(result.forecast_only), uncontrolled_72h=list(result.uncontrolled_72h))
             self._solve_greedy_fallback(result, **ctx)
             result.solver = "fallback"
         result.solve_ms = round((time.perf_counter() - t0) * 1000.0, 1)
@@ -170,6 +184,45 @@ class EnergyPlanner:
         if not values:
             return [default] * horizon
         return (values + [values[-1]] * horizon)[:horizon]
+
+    def uncontrolled_profile(self, dev: dict, now: datetime, H: int, t_out: list[float], away: list[bool]) -> list[float]:
+        """Expected consumption (kWh per hour) of a device Power Controller does NOT control.
+
+        Never optimised or shifted – a flat, physically plausible estimate so the plan and the
+        capacity limits reflect what the house will really use:
+        * heating:   steady-state power to hold the device's own setpoint (outdoor forecast)
+        * hot water: the daily energy quota spread evenly over the day
+        * EV:        nominal power until the needed energy is delivered – ONLY when the car is
+                     connected AND actually charging (plugging in alone does not start a session)
+        * switch:    the daily runtime spread evenly
+        """
+        dtype = DeviceType(dev["device_type"])
+        p_nom = max(0.0, float(dev.get("nominal_power_kw", 1.0)))
+        out = [0.0] * H
+        if dtype == DeviceType.CLIMATE_HEATING:
+            alpha = max(1e-3, float(dev.get("alpha", 1.5)) * float(dev.get("heating_coefficient", 1.0)))
+            beta = float(dev.get("beta", 0.05))
+            hold = dev.get("hold_setpoint")
+            for t in range(H):
+                sp = float(dev.get("oot_temp", 10.0)) if away[t] else (
+                    float(hold) if hold is not None else self._series(dev.get("target_temps_72h"), t, 20.0))
+                out[t] = min(p_nom, max(0.0, beta * (sp - t_out[t]) / alpha))
+        elif dtype == DeviceType.CLIMATE_HOTWATER:
+            per_h = float(dev.get("daily_quota_hours", 3.0)) * p_nom / 24.0
+            out = [per_h * (0.2 if away[t] else 1.0) for t in range(H)]
+        elif dtype == DeviceType.EV_CHARGER:
+            if dev.get("connected") and dev.get("charging"):
+                need = max(0.0, float(dev.get("energy_needed_kwh", 0.0)))
+                rate = max(0.0, float(dev.get("live_power_kw") or p_nom))
+                for t in range(H):
+                    if need <= 1e-3:
+                        break
+                    out[t] = min(rate, need)
+                    need -= out[t]
+        elif dtype == DeviceType.SWITCH:
+            per_h = float(dev.get("runtime_hours", 0.0)) * p_nom / 24.0
+            out = [0.0 if away[t] else per_h for t in range(H)]
+        return [round(v, 3) for v in out]
 
     @staticmethod
     def _apply_intra_tier_rotation(now: datetime, devices: list[dict]) -> list[dict]:

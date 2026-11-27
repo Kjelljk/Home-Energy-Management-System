@@ -1,5 +1,60 @@
 # Changelog
 
+## 2.8.0
+
+### Plan includes every device
+- Devices that are **not committed** are now part of the 72 h plan as a flat, never-shifted
+  forecast (previously they were ignored, so plan and capacity were too optimistic):
+  heating = steady-state power for the device's own setpoint, hot water / switches = daily amount
+  spread evenly, EV = only when connected **and** charging. The forecast is treated like baseload,
+  so committed devices are planned in the capacity that is really left.
+- Object card and panel show the forecast for uncommitted devices (lighter colour).
+
+### Occupancy selector (new) – separate from Mode
+- New select **Power Controller Occupancy**: Home and awake / Sleeping / Away (work) / Home office.
+  Meant to be set by the user or an automation; it stays until changed and is persisted.
+- The selector decides the current hour(s), the Power Controller times decide later hours.
+  Home and awake never lowers rooms that need comfort (also in real time); Away (work) after the
+  scheduled return keeps the house warm; Mode Away ignores the selector. On first start the
+  selector takes the schedule's current state.
+
+### Price
+- Norgespris remaining this month: new sensor *Norgespris Remaining* (used, remaining, average per
+  day, projected month total and the date the volume is expected to run out).
+
+### Distribution diagnostics
+- The distributor records **who lends to whom** (free headroom first, then idle reservations) and a
+  summary (budget, reserved, lent, unused).
+- PI regulator diagnostics per device (room temperature, target, error, P/I terms, offset,
+  saturation, setpoint sent). The regulator state is now per device instead of per zone.
+
+### Panel (super user) – one page per module
+- **Overview** split into *Now & history* (KPIs, power per device last hour incl. "Other",
+  phase currents and voltages last 24 h, consumption 3 days back / 3 days ahead) and *Plan*.
+- **Price**: price split, 72 h price, Norgespris volume gauge and projection, grid tariff,
+  Norgespris vs. spot.
+- **Plan**: 72 h plan incl. forecasts, occupancy selector, 7-day occupancy schedule (home-office
+  switches for today and tomorrow), **plan vs. actual** (7 days, stored by Power Controller).
+- **Distribution**: live flow diagram grid → grid limiter → tariff limiter → overload acceptance →
+  distribution → devices, with lending arrows, phases and the decision per device.
+- "How this module works" diagrams on each page (also in the README).
+
+### Object card
+- 24 h strip now has an axis, units (kWh per hour), the setpoint line (°C) for heating/hot water
+  and shows the value for the hour you tap or hover.
+- Expandable **Regulator** section when an external room sensor controls the device.
+
+### Configuration
+- **Bug fix:** optional entity fields (e.g. the zone's window/door sensor) could not be left empty
+  because they were given an empty default. All optional entity fields are now truly optional
+  and can also be cleared again.
+- The configure dialogs list the selected entities with their **full entity ID**.
+- Optional phase voltage sensors (L1-L2, L2-L3, L3-L1) on the hub for the history charts.
+
+### Documentation
+- README rewritten around the three modules; technical block diagrams in `docs/img/`.
+- 6 new tests (72 total).
+
 ## 2.6.1
 
 ### Validation fixes (hassfest / HACS)

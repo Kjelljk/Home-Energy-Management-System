@@ -4,8 +4,8 @@
 without the earlier conversation. Read this first, then `README.md` (features) and
 `CHANGELOG.md` (per version).
 
-**Current version:** 2.6.1. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
-- Pure-Python engines: unit-tested (66 tests pass, ~5 s).
+**Current version:** 2.8.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
+- Pure-Python engines: unit-tested (72 tests pass, ~5 s).
 - HA layer: syntax/undefined-name checked; options flow and the card contract/panel feed are
   exercised with HA stubs. **Never run in a real Home Assistant instance yet.**
 - Frontend JS: exercised in Chromium with a mock `hass` (all buttons/steppers/selects, panel tabs,
@@ -26,7 +26,7 @@ without the earlier conversation. Read this first, then `README.md` (features) a
 1. v1 spec by the owner → Gemini v2.1 spec + first code (MILP, untested, many critical bugs).
 2. 2.2 rewrite (LP planner, editable grid tariff, persistence, robustness) → 2.3 overload
    acceptance + English only → 2.4 shadow evaluation (Norgespris vs. spot) → 2.5 occupancy and
-   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon.
+   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix.
 
 ---
 
@@ -75,9 +75,12 @@ Four loops in `coordinator.py`:
   allocated_kw, nominal_kw, plan_24h, setpoint_24h, predicted_temp_24h, window_start, next_action,
   plan_start, legionella_hours, hold_remaining_s, plan_priority, entities{committed, priority_now,
   control, comfort_temp, eco_temp, nominal_temp, target_soc, finish_by, runtime_hours, …}` plus
-  per-type values. Actions are plain services: `homeassistant.toggle`, `input_number/number.set_value`,
+  per-type values, `forecast_only`, `governor` (PI diagnostics), `governor_enabled`. Actions are plain services: `homeassistant.toggle`, `input_number/number.set_value`,
   `datetime.set_value`, `climate.*`, `water_heater.*`.
-- **Panel** reads `power_controller/overview` (admin websocket) and calls `switch.toggle` and
+- **Panel** has one page per module (Overview / Price / Plan / Distribution / Devices / Priorities).
+  It reads `power_controller/overview` (admin websocket: kpi, plan, `flow` incl. lending `edges`,
+  `norgespris`, 7 `occupancy_days`, `plan_history`, `history_entities`) plus recorder history and
+  statistics, and calls `select.select_option`, `switch.toggle` and
   `power_controller.set_priorities`.
 - Styling: HA theme variables only (`--primary-color`, `--card-background-color`,
   `--ha-card-border-radius`, `--ha-card-box-shadow`, `--state-climate-heat-color`, …).
@@ -96,6 +99,13 @@ Four loops in `coordinator.py`:
 9. **Departure time is for planning only**; Away→Arriving when pre-heat starts, Arriving→Home at arrival.
 10. **Shadow evaluation never actuates** and carries its own state (no "saving" by being colder).
 11. **Occupancy drives comfort** when not out of town; a device's own schedule helper wins.
+    Two separate inputs: **Mode** (Home/Away/Arriving = days ahead) and the **Occupancy select**
+    (Home and awake / Sleeping / Away (work) / Home office = now, set by the owner's automation).
+    The select decides the first 2 plan hours, the Power Controller times decide later hours.
+    Home and awake never lowers comfort rooms (also in real time); Away (work) after the scheduled
+    return keeps the house warm; Mode Away ignores the select. Persisted; initialised from the schedule.
+12a. **Uncommitted devices are planned as a forecast** (flat, never shifted) and added to the
+    baseload the optimiser sees. EV only when connected AND charging.
 12. **Committed card hides mode buttons** (targets only); uncommitted card = normal controls.
 13. **Super-user vs. users:** overview panel is admin-only; object cards go on everyday dashboards.
 14. **Robustness:** service calls via `_safe_call`; one failing device never stops the loop.
@@ -132,6 +142,7 @@ node --check custom_components/power_controller/www/*.js
    tests (coordinator, config flow, entities, websocket, panel registration).
 2. Verify OCPP service names/parameters against the installed OCPP integration.
 3. Object card: optional editing of *Comfort temperature during* (stored in config entry options).
+3b. Owner's plan: calendar/schedule entity for home office and home/away events feeding the planner.
 4. EV: 3-phase chargers not supported; SoC defaults to 50 % without a sensor.
 5. Water heater without sensor: legionella completion inferred from power draw.
 6. Consider HA config subentries instead of separate zone/device entries.

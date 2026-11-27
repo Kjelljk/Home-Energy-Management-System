@@ -11,7 +11,9 @@ except ImportError:
         pass
 
 DOMAIN = "power_controller"
-VERSION = "2.7.0"  # keep in sync with manifest.json (used for frontend cache busting)
+
+VERSION = "2.8.0"  # keep in sync with manifest.json (used for frontend cache busting)
+
 PLATFORMS: list[str] = [
     "sensor",
     "binary_sensor",
@@ -124,6 +126,9 @@ CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_EXTERNAL_LIMIT_SENSOR = "external_limit_sensor"
 CONF_SENSOR_TIMEOUT_S = "sensor_timeout_s"
+CONF_VOLTAGE_L12_SENSOR = "voltage_l1_l2_sensor"
+CONF_VOLTAGE_L23_SENSOR = "voltage_l2_l3_sensor"
+CONF_VOLTAGE_L31_SENSOR = "voltage_l3_l1_sensor"
 
 # Config keys - Overload Acceptance (minutes / ratio), hub options
 CONF_OA_DELAY_5 = "oa_delay_5_min"
@@ -189,6 +194,13 @@ SERVICE_SET_PRIORITIES = "set_priorities"
 SERVICE_RECALCULATE_PLAN = "recalculate_plan"
 SERVICE_RESET_SHADOW = "reset_shadow_evaluation"
 SERVICE_SET_HOME_OFFICE = "set_home_office"
+
+OCCUPANCY_LABELS: dict[str, str] = {
+    "home_awake": "Home and awake",
+    "sleep": "Sleeping",
+    "away_work": "Away (work)",
+    "home_office": "Home office",
+}
 
 SHADOW_MODEL_LABELS: dict[str, str] = {
     "off": "Off",
