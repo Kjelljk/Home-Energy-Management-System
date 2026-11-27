@@ -263,6 +263,7 @@ class PowerDistributor:
         house_non_ev_kw: float,
         min_ev_a: int = 6,
         max_ev_a: int = 32,
+        ramp: bool = True,
     ) -> int:
         """Direct feed-forward EV current calculation with instant drop and slewed upward ramp."""
         ev_amps_now = power_kw_to_it_phase_amps(ev_live_power_kw)
@@ -283,9 +284,14 @@ class PowerDistributor:
             return 0
 
         target_int = int(raw_target_a)
-        if target_int < prev_target_a:
-            # Immediate drop on overload / appliance startup
+        if target_int < prev_target_a or not ramp:
+            # Immediate drop on overload / appliance startup (or no ramp: command patience
+            # already limits how often the current changes)
             return target_int
+        if prev_target_a < min_ev_a:
+            # (re)start: begin at the minimum current at least – never 0 + step (e.g. 2 A),
+            # which is below what the charger/car accepts
+            return max(min_ev_a, min(target_int, min_ev_a + int(round(self.ev_ramp_up_step_a))))
         # Asymmetric upward slew rate
         max_step = max(1, int(round(self.ev_ramp_up_step_a)))
         return min(target_int, int(prev_target_a) + max_step)

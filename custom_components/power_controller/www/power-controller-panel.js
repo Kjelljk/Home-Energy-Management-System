@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.10.1";
+const PCP_VERSION = "2.10.2";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {

@@ -73,7 +73,8 @@
           "ev_soc_sensor": "EV Battery SoC Sensor (%) (optional)",
           "ev_conn_id": "OCPP Connector ID",
           "comfort_during": "Comfort temperature during",
-          "heater_kind": "Heater type"
+          "heater_kind": "Heater type",
+          "ev_target_soc_entity": "Car's target SoC (number entity, optional – used as charge target)"
         }
       }
     }
@@ -120,7 +121,8 @@
           "insulation_class": "Insulation Class",
           "window_sensor": "Window/Door sensor (optional – pauses thermal learning when open)",
           "comfort_during": "Comfort temperature during",
-          "heater_kind": "Heater type"
+          "heater_kind": "Heater type",
+          "ev_target_soc_entity": "Car's target SoC (number entity, optional – used as charge target)"
         }
       },
       "hub_settings": {

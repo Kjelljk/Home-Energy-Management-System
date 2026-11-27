@@ -315,11 +315,11 @@ class DeviceEvTargetSocNumber(_DeviceBaseNumber):
 
     @property
     def native_value(self) -> float:
-        return self.coordinator.target_soc.get(self._eid, 80.0)
+        # mirrors the car's own target SoC entity when one is configured
+        return self.coordinator.ev_target_soc(self._eid)
 
     async def async_set_native_value(self, value: float) -> None:
-        self.coordinator.target_soc[self._eid] = float(value)
-        await self.coordinator.async_settings_changed(reprice=False)
+        await self.coordinator.async_set_ev_target_soc(self._eid, value)
 
 
 class DeviceSwitchRuntimeNumber(_DeviceBaseNumber):

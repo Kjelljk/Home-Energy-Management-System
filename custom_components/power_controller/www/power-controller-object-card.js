@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.10.1";
+const PC_CARD_VERSION = "2.10.2";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -307,7 +307,7 @@ class PowerControllerObjectCard extends HTMLElement {
         const fin = a.finish_by ? pcHHMM(new Date(a.finish_by)) : "07:00";
         f = `<div><div class="socb"><i style="width:${soc ?? 0}%"></i><em style="left:${tgt}%"></em></div>
              <div class="sl"><span>${soc === null ? "–" : soc.toFixed(0)} % now</span><span>target ${tgt} %</span></div></div>
-             <div class="row2">${e.target_soc ? this._stepper("target_soc", tgt, "%", "Target", 0) : ""}
+             <div class="row2">${e.target_soc ? this._stepper("target_soc", tgt, "%", a.target_soc_source === "car" ? "Car target" : "Target", 0) : ""}
              ${e.finish_by ? `<label class="sel${a.deadline_enabled === false ? " dim" : ""}"><ha-icon icon="mdi:clock-check-outline"></ha-icon><span class="sr">Ready by</span><input type="time" data-act="finish" value="${fin}" aria-label="Ready by" ${a.deadline_enabled === false ? "disabled" : ""}></label>` : ""}</div>
              <div class="chips">${e.deadline_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="deadline_enabled" aria-pressed="${a.deadline_enabled !== false}"><ha-icon icon="mdi:clock-end"></ha-icon>${a.deadline_enabled !== false ? "Deadline on" : "No deadline"}</button>` : ""}
              ${e.min_soc_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="min_soc_enabled" aria-pressed="${!!a.min_soc_enabled}"><ha-icon icon="mdi:battery-clock-outline"></ha-icon>Min ${pcNum(a.min_soc) ?? 30} %${a.min_soc_enabled && a.min_soc_deadline ? ` by ${new Date(a.min_soc_deadline).toLocaleDateString(undefined, { weekday: "short" })} ${pcHHMM(new Date(a.min_soc_deadline))}` : a.min_soc_enabled ? " within 24 h" : " off"}</button>` : ""}</div>`;
@@ -316,7 +316,8 @@ class PowerControllerObjectCard extends HTMLElement {
     const hold = pcNum(a.hold_remaining_s) ?? 0;
     const lc = a.last_command;
     const lcTxt = lc && lc.value !== null && lc.value !== undefined ? ` · last command ${Number(lc.value).toFixed(lc.unit === "A" ? 0 : 1)} ${lc.unit} ${pcHHMM(new Date(lc.ts))}` : "";
-    const holdTxt = (hold > 0 ? `Next change allowed in ${Math.floor(hold / 60)}:${String(hold % 60).padStart(2, "0")}` : `Plan #${a.plan_priority ?? "–"}`) + lcTxt;
+    const evTxt = t === "ev_charger" && a.last_action ? ` · ${a.last_action}` : "";
+    const holdTxt = (hold > 0 ? `Next change allowed in ${Math.floor(hold / 60)}:${String(hold % 60).padStart(2, "0")}` : `Plan #${a.plan_priority ?? "–"}`) + lcTxt + evTxt;
     return `${this._stripHtml(a)}${this._governorHtml(a)}${f ? `<div class="feat">${f}</div>` : ""}
       <div class="acts"><button type="button" class="pn" data-act="pnow" aria-pressed="${!!a.priority_now}" ${e.priority_now ? "" : "disabled"}>
       <ha-icon icon="mdi:lightning-bolt"></ha-icon>Priority now</button><span class="hint">${holdTxt}</span></div>`;
@@ -424,7 +425,7 @@ class PowerControllerObjectCard extends HTMLElement {
     else if (key === "eco") { const l = this._numLimits(e.eco_temp, 5, 25, 0.5); this._step(key, a.eco_temp, d, l.min, l.max, l.step, (v) => this._setNumber(e.eco_temp, v)); }
     else if (key === "nominal") { const l = this._numLimits(e.nominal_temp, 40, 80, 1); this._step(key, a.nominal_temp, d, l.min, l.max, l.step, (v) => this._setNumber(e.nominal_temp, v)); }
     else if (key === "runtime") { const l = this._numLimits(e.runtime_hours, 0, 24, 1); this._step(key, a.runtime_required_h, d, l.min, l.max, Math.max(1, l.step), (v) => this._setNumber(e.runtime_hours, v)); }
-    else if (key === "target_soc") { const l = this._numLimits(e.target_soc, 10, 100, 1); this._step(key, a.target_soc, d, l.min, l.max, 5, (v) => this._setNumber(e.target_soc, v)); }
+    else if (key === "target_soc") { const l = this._numLimits(e.target_soc, 10, 100, 1); this._step(key, a.target_soc, d, l.min, l.max, Math.max(5, l.step), (v) => this._setNumber(e.target_soc, v)); }
     else if (key === "ctemp" && ctrl) {
       const at = ctrl.attributes;
       this._step(key, at.temperature, d, pcNum(at.min_temp) ?? 7, pcNum(at.max_temp) ?? 35, pcNum(at.target_temp_step) ?? 0.5,
