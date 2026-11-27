@@ -11,7 +11,9 @@ except ImportError:
         pass
 
 DOMAIN = "power_controller"
+
 VERSION = "2.8.0"  # keep in sync with manifest.json (used for frontend cache busting)
+
 PLATFORMS: list[str] = [
     "sensor",
     "binary_sensor",
