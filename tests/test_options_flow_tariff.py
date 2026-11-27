@@ -31,6 +31,7 @@ def _install_stubs() -> None:
     vol.Schema = lambda schema, *a, **k: schema
     vol.In = lambda x: x
     vol.All = lambda *a: a
+    vol.Coerce = lambda t: t
     sys.modules["voluptuous"] = vol
 
     ha = types.ModuleType("homeassistant")
