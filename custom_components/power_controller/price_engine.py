@@ -249,11 +249,17 @@ class EnergyPriceEngine:
         hour_ts: datetime,
         energy_kwh: float,
         total_price_nok_per_kwh: float = 0.0,
+        count_peak: bool = True,
     ) -> bool:
-        """Record a completed hour. Returns True if the active tariff stepped up."""
+        """Record a completed hour. Returns True if the active tariff stepped up.
+
+        ``count_peak=False`` books energy and cost but keeps the hour out of the daily peaks
+        (used for implausible hours from the statistics, e.g. several hours lumped together)."""
         energy_kwh = max(0.0, float(energy_kwh))
         self.monthly_energy_kwh += energy_kwh
         self.monthly_cost_nok += energy_kwh * max(0.0, float(total_price_nok_per_kwh))
+        if not count_peak:
+            return False
 
         day_key = hour_ts.strftime("%Y-%m-%d")
         if energy_kwh > self.daily_peaks.get(day_key, 0.0):

@@ -112,7 +112,7 @@ from .actuation import (
 from .grid_tariff import GridTariffSchedule
 from .price_engine import EnergyPriceEngine, PriceSeries72h, build_workday_mask, is_norwegian_workday
 from .card_model import next_action, plan_index, plan_window, ui_status, value_at
-from .energy_meter import ClosedHour, HourEnergyTracker, rebuild_month
+from .energy_meter import ClosedHour, HourEnergyTracker, max_hour_kwh_for_fuse, rebuild_month
 from .notifier import ACTION_IGNORE, ACTION_PRIORITY_NOW, NotifySettings, Notifier, parse_hhmm
 from .occupancy import OCC_SELECT_OPTIONS, OccupancyProfile, apply_selector, effective_state
 from .shadow import ShadowEvaluator
@@ -236,6 +236,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # hourly energy (integrated grid power or hourly utility-meter sensor) and notifications
         self.hour_meter = HourEnergyTracker()
         self.month_source: dict = {"source": "live"}
+        # hours measured by Power Controller itself this month (trusted for the capacity charge)
+        self.own_hours: dict[str, float] = {}
         self.notifier = Notifier()
         self._setpoint_mismatch_since: dict[str, datetime] = {}
         self._ocpp_rejected: dict[str, datetime] = {}
@@ -266,6 +268,15 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self._zones_without_seed.add(zid)
         self._restore_settings(saved.get("settings", {}))
         self._restore_runtime(saved.get("runtime", {}))
+        # stored peaks from older versions may contain lumped (implausible) hours: drop them and
+        # re-derive the active step (the statistics rebuild below then gives the exact month)
+        pe = self.price_engine
+        limit = max_hour_kwh_for_fuse(self.limiters.internal_limit_a)
+        bad = {k: v for k, v in pe.daily_peaks.items() if v > limit}
+        if bad:
+            _LOGGER.warning("Dropping implausible stored daily peaks (> %.1f kWh/h): %s", limit, bad)
+            pe.daily_peaks = {k: v for k, v in pe.daily_peaks.items() if v <= limit}
+            pe.active_tariff_kw = max(pe.selected_tariff_kw, pe.locked_tier_kw())
 
         hour = saved.get("hour", {})
         if hour.get("key") == now.strftime("%Y-%m-%dT%H"):
@@ -273,6 +284,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self._hour_dev_kwh = dict(hour.get("device_kwh", {}))
             self.hour_meter.restore(hour.get("tracker"), now)
         self.notifier.restore(saved.get("notifier"))
+        self.own_hours = {k: float(v) for k, v in (saved.get("own_hours") or {}).items()
+                          if k[:7] == now.strftime("%Y-%m")}
         counters = saved.get("day_counters", {})
         if counters.get("day") == now.strftime("%Y-%m-%d"):
             self._day_key = counters["day"]
@@ -456,6 +469,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         d["hour"] = {"key": self._hour_key, "device_kwh": dict(self._hour_dev_kwh),
                      "tracker": self.hour_meter.to_dict()}
         d["notifier"] = self.notifier.to_dict()
+        d["own_hours"] = dict(self.own_hours)
         d["shadow"] = self.shadow.to_dict()
         d["plan_history"] = self.plan_history[-168:]
         d["day_counters"] = {"day": self._day_key, "energy": self._day_energy_kwh, "runtime": self._day_runtime_h}
@@ -804,11 +818,22 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         now = dt_util.now()
         month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
         hours = await self._async_meter_hour_stats(month_start, now)
-        if not hours:
+        trusted = {}
+        for k, v in self.own_hours.items():
+            ts = dt_util.parse_datetime(k)
+            if ts is not None:
+                trusted[dt_util.as_local(ts)] = float(v)
+        if not hours and not trusted:
             self.month_source = {"source": "live", "reason": "no recorder statistics for the meter"}
             return
         before = self.price_engine.active_tariff_kw
-        summary = rebuild_month(self.price_engine, hours, self._hour_price, now)
+        summary = rebuild_month(self.price_engine, hours or [], self._hour_price, now,
+                                max_hour_kwh=max_hour_kwh_for_fuse(self.limiters.internal_limit_a),
+                                trusted=trusted)
+        if summary.get("corrected_hours"):
+            _LOGGER.warning("Meter statistics: %s implausible hour(s) corrected (max %.1f kWh/h): %s",
+                            summary["corrected_hours"], summary["max_hour_kwh"],
+                            {k: summary[k] for k in ("replaced_by_measured", "spread_from", "excluded_from_peaks")})
         if self.price_engine.active_tariff_kw > before and self._stepped_up_at is None:
             self._stepped_up_at = now
         self.month_source = {"source": "statistics", **summary, "rebuilt": now.isoformat()}
@@ -937,7 +962,13 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.price_engine.reset_monthly_counters()
             stepped_up = False
         else:
-            stepped_up = self.price_engine.record_hourly_consumption(prev_hour, closed.kwh, price_prev)
+            # only full hours measured by Power Controller are trusted (not the start-up estimate)
+            if closed.full:
+                self.own_hours[prev_hour.isoformat()] = round(closed.kwh, 4)
+                self.own_hours = {k: v for k, v in self.own_hours.items() if k[:7] == prev_hour.isoformat()[:7]}
+            plausible = closed.kwh <= max_hour_kwh_for_fuse(self.limiters.internal_limit_a)
+            stepped_up = self.price_engine.record_hourly_consumption(prev_hour, closed.kwh, price_prev,
+                                                                     count_peak=plausible)
         if stepped_up:
             self._stepped_up_at = now
         if now.strftime("%Y-%m-%d") != self._day_key:

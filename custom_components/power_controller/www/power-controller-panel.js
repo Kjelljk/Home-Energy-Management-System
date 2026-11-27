@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.11.0";
+const PCP_VERSION = "2.11.1";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
@@ -567,7 +567,7 @@ class PowerControllerPanel extends HTMLElement {
       ["This hour", pF(k.energy_this_hour_kwh), "kWh", `projected ${pF(k.energy_projected_kwh, 1)} of ${pF(k.hour_allowance_kwh)} kWh allowed · avg 60 min ${pF(k.p_avg_60m_kw)} kW · ${k.hour_energy_source === "hour_sensor" ? "hour sensor" : "integrated grid power"}`, this._pct(k.energy_projected_kwh, k.hour_allowance_kwh), k.energy_projected_kwh > k.hour_allowance_kwh ? "var(--warning-color)" : "var(--success-color)"],
       ["Capacity step", `${lower}–${pF(k.active_step_kw, 0)}`, "kW", `top-3 average ${pF(k.top3_mean_kw)} kWh/h · ${pNok(k.capacity_charge_nok)} NOK`, this._pct(k.top3_mean_kw, k.active_step_kw), "var(--warning-color)"],
       ["Price now", pF(pn.total), "NOK/kWh", `energy ${pF(pn.energy)} + grid ${pF(pn.grid)}${pn.period ? ` (${pE(pn.period)})` : ""}`],
-      ["Month to date", pNok(k.month_cost_nok), "NOK", `${pNok(k.month_energy_kwh)} kWh · ${k.month_source?.source === "statistics" ? `from meter statistics${k.month_source.missing_hours ? ` (${k.month_source.missing_hours} h missing)` : ""}` : "live (no meter statistics)"}`],
+      ["Month to date", pNok(k.month_cost_nok), "NOK", `${pNok(k.month_energy_kwh)} kWh · ${k.month_source?.source === "statistics" ? `from meter statistics${k.month_source.missing_hours ? ` (${k.month_source.missing_hours} h missing)` : ""}${k.month_source.corrected_hours ? ` · ${k.month_source.corrected_hours} implausible h corrected` : ""}` : "live (no meter statistics)"}`],
       np.active ? ["Norgespris left", pNok(np.remaining_kwh), "kWh", np.projected_reach_date ? `runs out ≈ ${pDay(new Date(np.projected_reach_date))}` : `of ${pNok(np.volume_kwh)} kWh · lasts the month`, 100 - this._pct(np.used_kwh, np.volume_kwh), "var(--info-color, var(--primary-color))"]
         : ["Norgespris benefit", k.shadow_benefit_nok === null ? "Off" : `${k.shadow_benefit_nok >= 0 ? "+" : ""}${pNok(k.shadow_benefit_nok)}`, k.shadow_benefit_nok === null ? "" : "NOK", "vs. optimised spot this month"],
     ]);
