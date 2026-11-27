@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.6.1";
+const PC_CARD_VERSION = "2.8.0";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -218,14 +218,73 @@ class PowerControllerObjectCard extends HTMLElement {
   }
 
   _stripHtml(a) {
-    if (!this._config.show_plan || !a.committed) return "";
+    if (!this._config.show_plan) return "";
+    const forecast = !a.committed;
+    if (forecast && !a.forecast_only) return "";
     const plan = (a.plan_24h || []).map((v) => pcNum(v) ?? 0);
     if (!plan.length) return "";
-    const mx = Math.max(...plan, 0.5);
+    const sp = (a.setpoint_24h || []).map(pcNum);
+    const hasSp = !forecast && ["climate_heating", "climate_hotwater"].includes(a.device_type) && sp.some((v) => v !== null);
     const start = a.window_start ? new Date(a.window_start) : new Date();
+    const step = (m) => (m <= 1 ? 0.25 : m <= 3 ? 0.5 : m <= 8 ? 1 : 2);
+    const mx = Math.max(...plan, 0.2);
+    const top = Math.ceil(mx / step(mx)) * step(mx);
+    const W = 300, H = 62, R = hasSp ? 30 : 4, L = 30, iw = W - L - R, bw = iw / plan.length;
+    let o = `<line x1="${L}" x2="${L + iw}" y1="${H - 0.5}" y2="${H - 0.5}" class="ax"/><line x1="${L}" x2="${L + iw}" y1="1" y2="1" class="gl"/>`;
+    o += `<text x="${L - 4}" y="9" class="tl" text-anchor="end">${top.toFixed(top < 1 ? 2 : 1)}</text><text x="${L - 4}" y="${H - 2}" class="tl" text-anchor="end">0</text>`;
+    plan.forEach((v, i) => {
+      const h = Math.max(v > 0.01 ? 2 : 1, (v / top) * (H - 3));
+      o += `<rect x="${L + i * bw + bw * 0.12}" y="${H - h}" width="${bw * 0.76}" height="${h}" rx="1" class="b${i === 0 ? " now" : ""}" style="opacity:${v > 0.01 ? (forecast ? 0.45 : 0.9) : 0.2}"/>`;
+    });
+    this._strip = { plan, sp: hasSp ? sp : null, start, L, bw, W, n: plan.length, forecast };
+    if (hasSp) {
+      const vals = sp.filter((v) => v !== null);
+      const lo = Math.floor(Math.min(...vals) - 0.5), hi = Math.ceil(Math.max(...vals) + 0.5);
+      let d = "";
+      sp.forEach((v, i) => { if (v === null) return; const y = H - ((v - lo) / (hi - lo)) * (H - 4) - 2; d += `${d ? "L" : "M"}${L + i * bw},${y}L${L + (i + 1) * bw},${y}`; });
+      o += `<path d="${d}" class="spl"/><text x="${W - 1}" y="9" class="tl" text-anchor="end">${hi}°</text><text x="${W - 1}" y="${H - 2}" class="tl" text-anchor="end">${lo}°</text>`;
+    }
+    o += `<line class="cur" x1="0" x2="0" y1="0" y2="${H}" style="opacity:0"/>`;
     const labels = [0, 6, 12, 18, 24].map((h) => (h === 0 ? "Now" : pcHHMM(new Date(start.getTime() + h * 3600e3))));
-    const bars = plan.map((v, i) => `<i class="${i === 0 ? "now" : ""}" style="height:${Math.max(6, (v / mx) * 100)}%;opacity:${v > 0.05 ? 0.9 : 0.22}"></i>`).join("");
-    return `<div class="strip"><div class="bars" aria-hidden="true">${bars}</div><div class="sl">${labels.map((l) => `<span>${l}</span>`).join("")}</div><div class="nxt">${this._nextText(a)}</div></div>`;
+    const legend = `<span><i class="lb"></i>kWh per hour${forecast ? " · forecast (not controlled)" : " · planned"}</span>${hasSp ? `<span><i class="ll"></i>setpoint °C</span>` : ""}`;
+    return `<div class="strip"><div class="sh">${legend}<b class="tipv" aria-live="polite"></b></div>
+      <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Planned kWh per hour, next 24 hours" data-act="strip">${o}</svg>
+      <div class="sl" style="padding-left:${(L / W) * 100}%;padding-right:${(R / W) * 100}%">${labels.map((l) => `<span>${l}</span>`).join("")}</div>
+      <div class="nxt">${forecast ? this._forecastText(a, plan) : this._nextText(a)}</div></div>`;
+  }
+
+  _forecastText(a, plan) {
+    const tot = plan.reduce((x, y) => x + y, 0);
+    return `Not controlled · expected <b>${tot.toFixed(1)} kWh</b> next 24 h (counted in the plan, never shifted)`;
+  }
+
+  _stripTip(ev, svg) {
+    const s = this._strip; if (!s) return;
+    const r = svg.getBoundingClientRect();
+    const x = ((ev.clientX - r.left) / r.width) * s.W;
+    const i = Math.floor((x - s.L) / s.bw);
+    const out = this.shadowRoot.querySelector(".tipv");
+    const cur = svg.querySelector(".cur");
+    if (i < 0 || i >= s.n) { if (out) out.textContent = ""; if (cur) cur.style.opacity = 0; return; }
+    const t = new Date(s.start.getTime() + i * 3600e3);
+    const spv = s.sp && s.sp[i] !== null && s.sp[i] !== undefined ? ` · ${Number(s.sp[i]).toFixed(1)} °C` : "";
+    if (out) out.textContent = `${pcHHMM(t)} · ${s.plan[i].toFixed(2)} kWh${spv}`;
+    if (cur) { const cx = s.L + (i + 0.5) * s.bw; cur.setAttribute("x1", cx); cur.setAttribute("x2", cx); cur.style.opacity = 0.6; }
+  }
+
+  _governorHtml(a) {
+    if (!a.governor_enabled || !a.committed) return "";
+    const g = a.governor;
+    const rows = g ? [
+      ["Room (external sensor)", `${g.room_temp.toFixed(1)} °C`], ["Target", `${g.target_temp.toFixed(1)} °C`],
+      ["Error", `${g.error >= 0 ? "+" : ""}${g.error.toFixed(2)} K`], [`P term (Kp ${g.kp})`, `${g.p_term.toFixed(2)} K`],
+      [`I term (Ki ${g.ki})`, `${g.i_term.toFixed(2)} K`], ["Offset (−2…+4)", `${g.offset.toFixed(2)} K${g.saturated ? " · limited" : ""}`],
+      ["Setpoint sent to device", `${g.setpoint_out.toFixed(1)} °C`],
+    ] : [];
+    return `<details class="gov" ${this._govOpen ? "open" : ""}><summary>Regulator · external room sensor${g ? ` <span class="hint">→ ${g.setpoint_out.toFixed(1)} °C</span>` : ""}</summary>
+      ${g ? `<div class="gv">${rows.map(([k, v]) => `<span>${k}</span><b>${v}</b>`).join("")}</div>
+      <div class="hint">PI controller: setpoint = target + clamp(Kp·error + ∫Ki·error dt). Updated every 10 s while the device is allowed to heat.</div>`
+        : `<div class="hint">No regulator output yet (the device has not been allowed to heat since start-up).</div>`}</details>`;
   }
 
   _committedBody(a) {
@@ -253,13 +312,14 @@ class PowerControllerObjectCard extends HTMLElement {
     }
     const hold = pcNum(a.hold_remaining_s) ?? 0;
     const holdTxt = hold > 0 ? `Anti-cycling ${Math.floor(hold / 60)}:${String(hold % 60).padStart(2, "0")}` : `Plan #${a.plan_priority ?? "–"}`;
-    return `${this._stripHtml(a)}${f ? `<div class="feat">${f}</div>` : ""}
+    return `${this._stripHtml(a)}${this._governorHtml(a)}${f ? `<div class="feat">${f}</div>` : ""}
       <div class="acts"><button type="button" class="pn" data-act="pnow" aria-pressed="${!!a.priority_now}" ${e.priority_now ? "" : "disabled"}>
       <ha-icon icon="mdi:lightning-bolt"></ha-icon>Priority now</button><span class="hint">${holdTxt}</span></div>`;
   }
 
   _manualBody(a, ctrl) {
-    if (a.device_type === "ev_charger") return `<div class="feat"><div class="hint">The charger is not limited by Power Controller while uncommitted.</div></div>`;
+    const strip = this._stripHtml(a);
+    if (a.device_type === "ev_charger") return `${strip}<div class="feat"><div class="hint">The charger is not limited by Power Controller while uncommitted.</div></div>`;
     if (!ctrl) return `<div class="feat"><div class="hint">Control entity not found.</div></div>`;
     const dom = ctrl.entity_id.split(".")[0];
     const at = ctrl.attributes || {};
@@ -278,7 +338,7 @@ class PowerControllerObjectCard extends HTMLElement {
     } else {
       f.push(this._segment("onoff", ctrl.state === "on" ? "on" : "off", ["off", "on"]));
     }
-    return `<div class="feat">${f.join("")}</div>`;
+    return `${strip}<div class="feat">${f.join("")}</div>`;
   }
 
   // ------------------------------------------------------------------ render
@@ -316,6 +376,8 @@ class PowerControllerObjectCard extends HTMLElement {
       try { root.querySelector(sel)?.focus(); } catch (_) { /* ignore */ }
     }
     this._bind();
+    const det = root.querySelector("details.gov");
+    if (det) det.addEventListener("toggle", () => { this._govOpen = det.open; });
   }
 
   _bind() {
@@ -331,6 +393,12 @@ class PowerControllerObjectCard extends HTMLElement {
       }
       if (act === "finish") {
         el.addEventListener("change", () => this._setFinish(el.value, e.finish_by));
+        return;
+      }
+      if (act === "strip") {
+        el.addEventListener("pointermove", (ev) => this._stripTip(ev, el));
+        el.addEventListener("pointerdown", (ev) => this._stripTip(ev, el));
+        el.addEventListener("pointerleave", () => { const o = root.querySelector(".tipv"); if (o) o.textContent = ""; });
         return;
       }
       el.addEventListener("click", (ev) => {
@@ -414,9 +482,20 @@ class PowerControllerObjectCard extends HTMLElement {
       .meter{height:4px;border-radius:4px;background:var(--soft2);margin-top:6px;overflow:hidden;position:relative}
       .meter i{position:absolute;top:0;bottom:0;left:0;border-radius:4px}
       .strip{margin-top:10px}
-      .bars{display:flex;align-items:flex-end;gap:2px;height:34px}
-      .bars i{flex:1;border-radius:2px 2px 0 0;min-height:2px;background:var(--c)}
-      .bars i.now{box-shadow:0 0 0 1.5px var(--ink)}
+      .sh{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:11px;color:var(--mut);margin-bottom:3px}
+      .sh span{display:inline-flex;align-items:center;gap:4px;margin-right:8px}.sh b{color:var(--ink);font-weight:600}
+      .lb{display:inline-block;width:9px;height:9px;border-radius:2px;background:var(--c)}
+      .ll{display:inline-block;width:12px;border-top:2px solid var(--ink)}
+      svg.chart{display:block;width:100%;height:auto;touch-action:pan-y;cursor:crosshair}
+      svg.chart .b{fill:var(--c)}svg.chart .b.now{stroke:var(--ink);stroke-width:1}
+      svg.chart .ax{stroke:var(--divider-color)}svg.chart .gl{stroke:var(--divider-color);stroke-dasharray:2 3}
+      svg.chart .tl{fill:var(--mut);font-size:8.5px}
+      svg.chart .spl{fill:none;stroke:var(--ink);stroke-width:1.4;vector-effect:non-scaling-stroke}
+      svg.chart .cur{stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke}
+      details.gov{margin-top:10px;background:var(--soft);border-radius:calc(var(--r) * .7);padding:8px 10px;font-size:12.5px}
+      details.gov summary{cursor:pointer;font-weight:600;color:var(--ink)}
+      .gv{display:grid;grid-template-columns:1fr auto;gap:4px 12px;margin:8px 0 6px;font-variant-numeric:tabular-nums}
+      .gv span{color:var(--mut)}
       .sl{display:flex;justify-content:space-between;font-size:10.5px;color:var(--mut);margin-top:3px}
       .nxt,.hint{font-size:12px;color:var(--mut)}
       .nxt{margin-top:6px}.nxt b{color:var(--ink);font-weight:600}

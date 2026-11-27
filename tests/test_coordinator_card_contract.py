@@ -155,7 +155,11 @@ def test_overview_payload_is_json_and_complete(coordinator):
     assert p["plan"]["index_now"] == 1
     assert len(p["plan"]["price_72h"]) == 72 and p["plan"]["price_72h"][0] is not None
     assert {d["name"] for d in p["devices"]} == {"Heat Pump", "Elbillader"}
-    assert len(p["occupancy_days"]) == 2 and len(p["occupancy_days"][0]["quarters"]) == 96
+    assert len(p["occupancy_days"]) == 7 and len(p["occupancy_days"][0]["quarters"]) == 96
+    assert p["occupancy_days"][1]["switch"] and p["occupancy_days"][2]["switch"] is None
+    assert p["norgespris"]["volume_kwh"] == 5000 and "remaining_kwh" in p["norgespris"]
+    assert {"grid_limiter", "tariff_limiter", "overload", "edges", "baseload_kw"} <= set(p["flow"])
+    assert set(p["history_entities"]) >= {"grid_power", "currents", "voltages", "devices"}
     assert p["occupancy_days"][0]["home_office"] is False
     assert len(p["tariff"]["today"]) == 24 and p["tariff"]["capacity_steps"]
     assert set(p["phases"]) == {"L1", "L2", "L3"}

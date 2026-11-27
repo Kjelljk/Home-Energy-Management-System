@@ -34,6 +34,36 @@ COMFORT_STATES = (STATE_HOME, STATE_HOME_OFFICE, STATE_SLEEP)   # selectable per
 DEFAULT_COMFORT_DURING = [STATE_HOME, STATE_HOME_OFFICE]
 OCCUPIED_STATES = (STATE_HOME, STATE_HOME_OFFICE)                # people active in the house
 
+# Values of the "Occupancy" select (the *current* situation, set by the user or an automation)
+OCC_SELECT_OPTIONS = (STATE_HOME, STATE_SLEEP, STATE_AWAY_WORK, STATE_HOME_OFFICE)
+OVERRIDE_HOURS = 2   # plans are solved at xx:59 -> index 0 = ending hour, index 1 = the next hour
+
+
+def effective_state(selected: str | None, scheduled: str) -> str:
+    """Combine the occupancy selector (now) with the time schedule.
+
+    * no selection          -> the schedule
+    * away_work selected but the schedule already expects us home -> keep the schedule's
+      comfort (we may arrive any minute, so the house is kept warm)
+    * otherwise             -> the selector wins for the current hour(s)
+    """
+    if not selected:
+        return scheduled
+    if selected == STATE_AWAY_WORK and scheduled in (STATE_HOME, STATE_HOME_OFFICE):
+        return scheduled
+    return selected
+
+
+def apply_selector(hour_states: list[set[str]], selected: str | None, hours: int = OVERRIDE_HOURS) -> list[set[str]]:
+    """Return a copy where the first ``hours`` entries follow the selector (see effective_state)."""
+    out = [set(s) for s in hour_states]
+    if not selected:
+        return out
+    for i in range(min(hours, len(out))):
+        out[i] = {effective_state(selected, OccupancyProfile.dominant_state(out[i]))}
+    return out
+
+
 WEEKDAY_KEYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 SAMPLES_PER_HOUR = (0, 15, 30, 45)   # an hour needs comfort if ANY quarter needs it
 

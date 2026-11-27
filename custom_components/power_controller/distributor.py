@@ -33,6 +33,10 @@ class PowerDistributor:
         self.pi_kp = float(pi_kp)
         self.pi_ki = float(pi_ki)
         self._pi_states: dict[str, _PIZoneState] = {}
+        # diagnostics for the dashboards
+        self.pi_diag: dict[str, dict] = {}
+        self.last_edges: list[dict] = []        # lending: {"from", "to", "kw"} ("from": None = free headroom)
+        self.last_summary: dict = {}
 
     def distribute(
         self,
@@ -85,6 +89,9 @@ class PowerDistributor:
         }
         avail_tariff_kw = max(0.0, float(tariff_limit_now_kw))
 
+        budget_in = avail_tariff_kw
+        lenders: list[list] = []   # [entry_id, remaining_kw] in priority order
+        edges: list[dict] = []
         # Pass 1: reservations for devices the plan wants running now (or Priority Now)
         lent_pool_kw = 0.0
         lent_pool_a = {"L1": 0.0, "L2": 0.0, "L3": 0.0}
@@ -117,6 +124,7 @@ class PowerDistributor:
 
                 # Lending: reservation held but the device is idle (own thermostat satisfied)
                 if dtype != DeviceType.EV_CHARGER and live_kw < 0.15 * p_nom:
+                    lenders.append([eid, grant_kw])
                     lent_pool_kw += grant_kw
                     lent_pool_a[p1] += grant_a
                     lent_pool_a[p2] += grant_a
@@ -138,6 +146,7 @@ class PowerDistributor:
         # planned-but-blocked loads first, then loads flagged with an explicit opportunistic need
         # (e.g. EV behind its deadline). Unplanned heaters do NOT get power just because
         # there is room – that would undo the cost optimisation.
+        free_after_pass1 = avail_tariff_kw
         total_kw = avail_tariff_kw + lent_pool_kw
         total_a = {ph: avail_phase_a[ph] + lent_pool_a[ph] for ph in ("L1", "L2", "L3")}
         waiting.sort(key=lambda d: (0 if d.get("_was_planned") else 1,
@@ -153,6 +162,21 @@ class PowerDistributor:
             if eligible and headroom_kw >= min_kw:
                 grant_kw = headroom_kw if dtype == DeviceType.EV_CHARGER else p_nom
                 grant_a = power_kw_to_it_phase_amps(grant_kw)
+                # attribute the grant: free headroom first, then idle reservations (lending)
+                need = grant_kw
+                take = min(need, max(0.0, free_after_pass1))
+                if take > 1e-3:
+                    edges.append({"from": None, "to": eid, "kw": round(take, 3)})
+                    free_after_pass1 -= take
+                    need -= take
+                for lender in lenders:
+                    if need <= 1e-3:
+                        break
+                    take = min(need, lender[1])
+                    if take > 1e-3:
+                        edges.append({"from": lender[0], "to": eid, "kw": round(take, 3)})
+                        lender[1] -= take
+                        need -= take
                 total_kw -= grant_kw
                 total_a[p1] -= grant_a
                 total_a[p2] -= grant_a
@@ -172,6 +196,15 @@ class PowerDistributor:
                     reason="blocked" if dev.get("_was_planned") else "not planned",
                 )
 
+        self.last_edges = edges
+        self.last_summary = {
+            "budget_kw": round(budget_in, 3),
+            "reserved_kw": round(sum(a.allowed_kw for a in allocations.values()), 3),
+            "lent_kw": round(sum(e["kw"] for e in edges if e["from"]), 3),
+            "unused_kw": round(max(0.0, total_kw), 3),
+            "uncontrolled_phase_a": {k: round(v, 2) for k, v in uncontrolled_phase_a.items()},
+            "committed_live_kw": round(committed_live_kw, 3),
+        }
         return allocations
 
     @staticmethod
@@ -239,4 +272,12 @@ class PowerDistributor:
             state.integral = candidate_i
 
         cmd_temp = float(target_temp) + clamped_offset
-        return round(cmd_temp * 2.0) / 2.0
+        out = round(cmd_temp * 2.0) / 2.0
+        self.pi_diag[zone_id] = {
+            "room_temp": round(float(external_room_temp), 2), "target_temp": round(float(target_temp), 2),
+            "error": round(error, 3), "p_term": round(p_term, 3), "i_term": round(state.integral, 3),
+            "offset_raw": round(raw_offset, 3), "offset": round(clamped_offset, 3),
+            "saturated": not (-2.0 < raw_offset < 4.0), "setpoint_out": out,
+            "kp": self.pi_kp, "ki": self.pi_ki,
+        }
+        return out
