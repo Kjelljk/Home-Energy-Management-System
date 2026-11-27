@@ -12,7 +12,8 @@ except ImportError:
 
 DOMAIN = "power_controller"
 
-VERSION = "2.9.0"  # keep in sync with manifest.json (used for frontend cache busting)
+VERSION = "2.10.0"  # keep in sync with manifest.json (used for frontend cache busting)
+
 
 PLATFORMS: list[str] = [
     "sensor",
@@ -164,6 +165,9 @@ CONF_TARGET_ENTITY = "target_entity"
 CONF_POWER_SENSOR = "power_sensor"
 CONF_SCHEDULE_ENTITY = "schedule_entity"
 CONF_HEATING_COEFFICIENT = "heating_coefficient"
+# Lending margin for stepless heaters: keep max(0.2 kW, 15 % of the grant) as headroom
+LEND_MARGIN_KW = 0.2
+LEND_MARGIN_FRACTION = 0.15
 CONF_HEATER_KIND = "heater_kind"     # how the device delivers power (information for PC)
 HEATER_STEPLESS = "stepless"         # modulates its power (heat pump, inverter)
 HEATER_ON_OFF = "on_off"             # full power or nothing (panel heater, cable, element)
@@ -197,6 +201,7 @@ SERVICE_SET_PRIORITIES = "set_priorities"
 SERVICE_RECALCULATE_PLAN = "recalculate_plan"
 SERVICE_RESET_SHADOW = "reset_shadow_evaluation"
 SERVICE_SET_HOME_OFFICE = "set_home_office"
+SERVICE_THERMAL_MODEL = "thermal_model"
 
 OCCUPANCY_LABELS: dict[str, str] = {
     "home_awake": "Home and awake",
@@ -246,3 +251,4 @@ class DeviceAllocation:
     is_lent_capacity: bool = False
     setpoint_override_c: float | None = None
     reason: str = ""
+    lent_kw: float = 0.0          # part of the grant that is lent to other devices right now

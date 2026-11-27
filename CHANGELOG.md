@@ -1,5 +1,52 @@
 # Changelog
 
+## 2.10.0
+
+### Redistribution: the unused part is lent
+- Previously a heater only lent its reservation when it used less than 15 % of it – and then all of
+  it. Now a **stepless** heater lends the unused part: grant − live − margin (margin = max(0.2 kW,
+  15 % of the grant)). A heat pump using 0.6 of 1.5 kW lends about 0.7 kW. **On/off** heaters still
+  lend everything while their own thermostat has switched them off, and nothing while running.
+- The lender keeps its grant; when it needs more, the next 10-second cycle shrinks the loan.
+- Each allocation reports the amount actually lent (`lent_kw`).
+
+### Calmer heat pump (heaters regulated by an external room sensor)
+- Own minimum interval between setpoint changes: **30 minutes** (number *Regulated Heater Minimum
+  Interval*). Other devices keep *Command Minimum Interval*. Urgent reductions (tariff step / phase)
+  still go out at once.
+- PI regulator hysteresis: the offset is held in 0.5 °C steps and only moves when the PI output has
+  drifted ≥ 0.75 °C away – no more 21.0 ↔ 21.5 flipping every 10 s. Target changes pass through.
+- The plan changes a setpoint at most once per clock hour (highest quarter of the hour), and a
+  pre-heat block is one step to its highest value instead of a 0.5 °C staircase.
+
+### Thermal models (new view on the Settings page)
+- One card per zone: status (learning / settling / stable / manual), room temperature, window state,
+  heaters with type and heating coefficient, and the learned values in plain units:
+  heat loss (W/°C), heat capacity (kWh/°C), time constant (h), power to hold 21 °C at 0/−10 °C,
+  cooling in 2 h without heat, prediction error and number of learning steps – each compared with
+  the start values and explained with a "?".
+- 7-day learning history chart (heat loss and time constant).
+- **Adjust manually** (heat capacity + heat loss; pauses learning), **pause/resume learning** and
+  **reset to start values**. New service `power_controller.thermal_model` (reset/set/freeze/unfreeze).
+- The model stores its bookkeeping (start values, samples, skipped steps, error, history).
+  Zones stored by older versions get their start values from area and insulation.
+
+### Settings page
+- A **?** next to every parameter with an explanation (hover, tap or keyboard).
+- Selects with profiles (price model, shadow model, mode, occupancy, priority profile) list every
+  option with a description in the help box, and show the description of the selected option.
+
+### Dashboards
+- Energy plan stacked bottom-up: baseload, devices that are not controlled, then **priority 1, 2, …**
+  The legend and tooltip follow the same order.
+- Distribution decisions: columns **Grant / Live / Lent** (kW).
+- Phase chart: voltages below 100 V are treated as missing (a dead or faulty sensor can no longer
+  squash the 215–230 V window). A series without valid values is marked "no data" with a warning.
+
+### Tests
+- 11 new tests (92 total): partial lending, PI hysteresis, one-step pre-heat, setpoint changes per
+  hour, regulated-heater interval, thermal model bookkeeping/reset/manual/persistence, payload.
+
 ## 2.9.0
 
 ### 15-minute planning

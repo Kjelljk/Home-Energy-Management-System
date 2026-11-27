@@ -728,6 +728,20 @@ class EnergyPlanner:
             else:
                 sp = target
             out.append(round(sp * 2.0) / 2.0)
+        # Smooth: a pre-heat block (setpoint above the target) becomes ONE step at the block's
+        # highest value instead of a staircase of 0.5 °C changes – fewer commands to the device.
+        t = 0
+        while t < len(out):
+            if out[t] > round(req[t] * 2.0) / 2.0 + 0.01:
+                j = t
+                while j < len(out) and out[j] > round(req[j] * 2.0) / 2.0 + 0.01:
+                    j += 1
+                top = max(out[t:j])
+                for k in range(t, j):
+                    out[k] = top
+                t = j
+            else:
+                t += 1
         return out
 
     @staticmethod

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from .const import (
+    LEND_MARGIN_FRACTION,
+    LEND_MARGIN_KW,
     DeviceAllocation,
     DeviceType,
     DistStatus,
@@ -13,9 +15,30 @@ from .const import (
 )
 
 
+PI_OFFSET_HYSTERESIS_C = 0.75
+
+
 @dataclass
 class _PIZoneState:
     integral: float = 0.0
+    last_out: float | None = None     # setpoint currently held (hysteresis)
+
+
+def lendable_kw(grant_kw: float, live_kw: float, modulating: bool) -> float:
+    """How much of a heater's grant may be lent to other devices right now.
+
+    * on/off heater: all of it while its own thermostat has switched it off (live < 15 %),
+      otherwise nothing – it can only run at full power.
+    * stepless heater: the unused part (grant − live) minus a safety margin, so a heat pump
+      using 0.6 of 1.5 kW lends ~0.7 kW and keeps room to modulate up a little.
+    The lender always keeps its grant; when it needs more the next 10-s cycle shrinks the loan.
+    """
+    grant_kw, live_kw = max(0.0, float(grant_kw)), max(0.0, float(live_kw))
+    if not modulating:
+        return grant_kw if live_kw < 0.15 * grant_kw else 0.0
+    margin = max(LEND_MARGIN_KW, LEND_MARGIN_FRACTION * grant_kw)
+    free = grant_kw - live_kw - margin
+    return round(free, 3) if free > 0.05 else 0.0
 
 
 class PowerDistributor:
@@ -123,15 +146,17 @@ class PowerDistributor:
                 avail_phase_a[p1] -= grant_a
                 avail_phase_a[p2] -= grant_a
 
-                # Lending: reservation held but the device is idle (own thermostat satisfied)
-                if dtype != DeviceType.EV_CHARGER and live_kw < 0.15 * grant_kw:
-                    lenders.append([eid, grant_kw])
-                    lent_pool_kw += grant_kw
-                    lent_pool_a[p1] += grant_a
-                    lent_pool_a[p2] += grant_a
-                    status = DistStatus.REDISTRIBUTING
-                else:
-                    status = DistStatus.PRIORITIZED
+                # Lending: the unused part of the reservation (on/off: all of it while idle;
+                # stepless: grant − live − margin). EV chargers do not lend (they ramp).
+                lend = 0.0 if dtype == DeviceType.EV_CHARGER else lendable_kw(grant_kw, live_kw, modulating)
+                if lend > 0.0:
+                    lend_a = power_kw_to_it_phase_amps(lend)
+                    lenders.append([eid, lend, lend])
+                    lent_pool_kw += lend
+                    lent_pool_a[p1] += lend_a
+                    lent_pool_a[p2] += lend_a
+                # "Redistributing" = the whole reservation is idle; partial lenders stay "Prioritized"
+                status = DistStatus.REDISTRIBUTING if lend >= 0.85 * grant_kw else DistStatus.PRIORITIZED
                 allocations[eid] = DeviceAllocation(
                     entry_id=eid,
                     allowed_kw=round(grant_kw, 3),
@@ -197,6 +222,11 @@ class PowerDistributor:
                     reason="blocked" if dev.get("_was_planned") else "not planned",
                 )
 
+        # actual amount lent per lender (only what borrowers really took)
+        for lender in lenders:
+            taken = round(lender[2] - lender[1], 3)
+            if lender[0] in allocations:
+                allocations[lender[0]].lent_kw = max(0.0, taken)
         self.last_edges = edges
         self.last_summary = {
             "budget_kw": round(budget_in, 3),
@@ -280,12 +310,20 @@ class PowerDistributor:
         if -2.0 < raw_offset < 4.0:
             state.integral = candidate_i
 
-        cmd_temp = float(target_temp) + clamped_offset
+        # Hysteresis on the offset: the offset is held in 0.5 °C steps and only moves when the
+        # PI output has drifted ≥ 0.75 °C away from the held value. Without this the 0.5 °C
+        # rounding flips back and forth every 10 s around a step boundary. Changes of the
+        # target itself pass straight through.
+        held = state.last_out
+        if held is None or abs(clamped_offset - held) >= PI_OFFSET_HYSTERESIS_C:
+            held = round(clamped_offset * 2.0) / 2.0
+            state.last_out = held
+        cmd_temp = float(target_temp) + held
         out = round(cmd_temp * 2.0) / 2.0
         self.pi_diag[zone_id] = {
             "room_temp": round(float(external_room_temp), 2), "target_temp": round(float(target_temp), 2),
             "error": round(error, 3), "p_term": round(p_term, 3), "i_term": round(state.integral, 3),
-            "offset_raw": round(raw_offset, 3), "offset": round(clamped_offset, 3),
+            "offset_raw": round(raw_offset, 3), "offset": round(clamped_offset, 3), "offset_held": held,
             "saturated": not (-2.0 < raw_offset < 4.0), "setpoint_out": out,
             "kp": self.pi_kp, "ki": self.pi_ki,
         }

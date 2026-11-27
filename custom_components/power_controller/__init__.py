@@ -27,6 +27,7 @@ from .const import (
     SERVICE_RECALCULATE_PLAN,
     SERVICE_RESET_SHADOW,
     SERVICE_SET_HOME_OFFICE,
+    SERVICE_THERMAL_MODEL,
     SERVICE_SET_PRIORITIES,
 )
 
@@ -246,6 +247,30 @@ def _register_services(hass: HomeAssistant) -> None:
             await coordinator.async_reset_shadow()
 
     hass.services.async_register(DOMAIN, SERVICE_RESET_SHADOW, handle_reset_shadow)
+
+    async def handle_thermal_model(call: ServiceCall) -> None:
+        coordinator = get_hub_coordinator(hass)
+        if coordinator is None:
+            raise ServiceValidationError("Power Controller hub is not loaded")
+        try:
+            await coordinator.async_thermal_model(
+                call.data["zone_id"], call.data["action"],
+                call.data.get("heat_capacity_kwh_per_c"), call.data.get("heat_loss_w_per_c"), call.data.get("freeze"))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_THERMAL_MODEL,
+        handle_thermal_model,
+        schema=vol.Schema({
+            vol.Required("zone_id"): cv.string,
+            vol.Required("action"): vol.In(["reset", "set", "freeze", "unfreeze"]),
+            vol.Optional("heat_capacity_kwh_per_c"): vol.All(vol.Coerce(float), vol.Range(min=0.05, max=100)),
+            vol.Optional("heat_loss_w_per_c"): vol.All(vol.Coerce(float), vol.Range(min=0.5, max=2000)),
+            vol.Optional("freeze"): cv.boolean,
+        }),
+    )
 
     async def handle_set_home_office(call: ServiceCall) -> None:
         from datetime import timedelta

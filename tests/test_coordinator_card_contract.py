@@ -166,3 +166,38 @@ def test_overview_payload_is_json_and_complete(coordinator):
     assert len(p["tariff"]["today"]) == 24 and p["tariff"]["capacity_steps"]
     assert set(p["phases"]) == {"L1", "L2", "L3"}
     assert p["kpi"]["price_now"]["total"] > 0
+
+
+def test_thermal_zones_and_settings_payload(coordinator):
+    import asyncio
+    p = coordinator.overview_payload()
+    tz = {z["zone_id"]: z for z in p["thermal_zones"]}
+    assert "z1" in tz
+    z = tz["z1"]
+    assert z["devices"][0]["name"] == "Heat Pump" and z["room_temp"] == 20.6
+    assert {"heat_loss_w_per_c", "heat_capacity_kwh_per_c", "time_constant_h", "status", "seed"} <= set(z)
+    # settings carry keys for the help texts
+    first = p["settings"][0]["entities"][0]
+    assert set(first) >= {"id", "key"} and first["key"] == "price_model"
+    assert any(e["key"] == "regulated_interval" for g in p["settings"] for e in g["entities"])
+
+    # manual values and reset through the coordinator (planner/refresh stubbed)
+    async def _noop(*a, **k):
+        return None
+    coordinator.async_run_planner = _noop
+    coordinator.async_request_refresh = _noop
+    coordinator.schedule_save = lambda: None
+    asyncio.run(coordinator.async_thermal_model("z1", "set", 3.0, 90.0))
+    s = coordinator.zones["z1"].summary()
+    assert s["heat_capacity_kwh_per_c"] == pytest.approx(3.0, rel=0.01)
+    assert s["heat_loss_w_per_c"] == pytest.approx(90.0, rel=0.01) and s["frozen"]
+    asyncio.run(coordinator.async_thermal_model("z1", "reset"))
+    assert not coordinator.zones["z1"].frozen and coordinator.zones["z1"].samples == 0
+    with pytest.raises(ValueError):
+        asyncio.run(coordinator.async_thermal_model("nope", "reset"))
+
+
+def test_regulated_heater_gets_long_command_interval(coordinator):
+    coordinator.device_entries["HP"].data["enable_pi_governor"] = True
+    assert coordinator.command_interval_s("HP") == 1800.0
+    assert coordinator.command_interval_s("EV") == 300.0

@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.9.0";
+const PCP_VERSION = "2.10.0";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
@@ -25,6 +25,81 @@ const PCP_OCC = {
 };
 const PCP_TYPE = { climate_heating: "Heating", climate_hotwater: "Hot water", ev_charger: "EV charger", switch: "Switch" };
 const PCP_TABS = [["ov", "Overview"], ["pr", "Price"], ["pl", "Plan"], ["di", "Distribution"], ["dv", "Devices"], ["po", "Priorities"], ["se", "Settings"]];
+/* ---- help texts for the Settings page (key = entity key) ---- */
+const PCP_HELP = {
+  price_model: "Which energy price you pay. Decides the energy part of the hourly/15-minute price the planner optimises against. The grid tariff is added on top in all models.",
+  norgespris: "Fixed Norgespris energy price, NOK/kWh excl. VAT (0.40 in 2026). Used up to the monthly volume.",
+  norgespris_volume: "Monthly volume (kWh) at Norgespris. Consumption above it is billed at spot price.",
+  supplier_markup: "Your electricity supplier's mark-up per kWh excl. VAT (spot agreements). Added to the energy price.",
+  support_threshold: "Strømstøtte: the state pays a share of the spot price above this level (NOK/kWh excl. VAT).",
+  support_rate: "Strømstøtte: the share (%) of the spot price above the threshold that is covered (90 % in 2026).",
+  vat: "VAT in percent. All prices you enter excl. VAT are multiplied by (1 + VAT).",
+  tariff: "Capacity step (kapasitetsledd) you aim to stay inside. The limiter keeps every hour below this step; if the month's top-3 hours already exceed it, the higher step is shown.",
+  shadow_model: "The price model the shadow evaluation compares your bill against. It never controls anything.",
+  shadow_extra_fee: "A fixed monthly fee for the alternative agreement (e.g. a spot agreement's fee), added in the comparison.",
+  grid_default: "Grid energy charge (energiledd) for all hours that are not covered by a period, e.g. nights and weekends.",
+  grid_fee: "Consumption tax (forbruksavgift) + Enova fee per kWh. Added to every hour.",
+  grid_period: "Grid energy charge for this period of the active price list. Hours, days and months are edited under Settings → Devices & services → Power Controller → Configure → Grid tariff.",
+  workday_wake: "Workday: when you usually get up. Comfort rooms are warm from this time.",
+  workday_leave: "Workday: when you usually leave for work. After this the house counts as away (or home office).",
+  workday_back: "Workday: when you usually come home. Rooms are pre-heated to be warm at this time.",
+  workday_sleep: "Workday: when you usually go to bed. Night temperatures apply after this (may be after midnight).",
+  free_day_wake: "Day off (weekend/holiday): when you usually get up.",
+  free_day_sleep: "Day off: when you usually go to bed.",
+  mode: "Where the household is in the coming days – used for the long-term plan.",
+  occupancy_select: "The situation right now. Set it yourself or from an automation; it stays until changed. It decides the current hour, the times above decide later hours.",
+  priority_profile: "Temporarily shifts the weights of the plan priority list for groups of devices, without rearranging the list. Only affects planning, not real-time distribution.",
+  arrival_time: "When you expect to be home again (with Mode Away/Arriving). Heating starts in time to be warm at arrival.",
+  departure_time: "When you plan to leave (with Mode Home). Used for planning only – it never switches anything by itself.",
+  baseload_24h: "Consumption that Power Controller does not control and that runs all day (fridge, network, standby), kW.",
+  baseload_daytime: "Extra uncontrolled consumption while someone is home and awake (cooking, lights, TV), kW.",
+  internal_limit: "Your main fuse per phase (A). The grid limiter never plans or distributes above it.",
+  cmd_interval: "Minimum time between two commands to the same device (setpoint or charging current). Reductions that protect the tariff step or a phase are sent at once.",
+  regulated_interval: "Minimum time between setpoint changes for heaters regulated by an external room sensor (typically heat pumps). Longer than for other devices to avoid wearing the compressor with frequent up/down changes. Urgent reductions still go out at once.",
+  ev_min_step: "The EV charging current is only changed when the new value differs by at least this many amperes (start/stop always allowed).",
+  setpoint_min_step: "A climate setpoint is only changed when the new value differs by at least this many degrees.",
+  ev_delay_penalty: "For EVs without a deadline: a small cost per kWh per hour of waiting, so charging is not postponed for days to save a few øre. 2 øre/kWh/h means waiting 10 h must save more than 20 øre/kWh.",
+};
+const PCP_OPT_HELP = {
+  price_model: {
+    "Norgespris": "Fixed energy price up to the monthly volume, spot price above it. Little price variation – the grid tariff (day/night) and the capacity charge matter most.",
+    "Spot + electricity support": "Nord Pool spot price; the state covers a share of the price above the threshold (strømstøtte). Large price variation – moving load in time pays off.",
+    "Spot": "Plain Nord Pool spot price without support.",
+  },
+  shadow_model: {
+    "Off": "No comparison.",
+    "Spot + electricity support": "Compare with what you would have paid on spot with strømstøtte, planned for spot prices.",
+    "Spot": "Compare with plain spot price.",
+  },
+  mode: {
+    "Home": "Living at home; you may be out during the day. Normal schedule and occupancy.",
+    "Away": "Out of town. Out-of-town temperatures; the occupancy selector is ignored.",
+    "Arriving": "On the way home. Heating starts so the house is warm at the arrival time.",
+  },
+  occupancy_select: {
+    "Home and awake": "Comfort rooms are never lowered, even if the schedule says bedtime.",
+    "Sleeping": "Night temperatures now; the morning follows the schedule.",
+    "Away (work)": "Lower now; pre-heating for the expected return follows the schedule. After the scheduled return the house is kept warm.",
+    "Home office": "Home-office rooms and the living room are warm now.",
+  },
+  priority_profile: {
+    "Normal": "The priority list as it is.",
+    "Comfort": "Heating and hot water weigh 10× more: comfort wins over the EV when capacity is short.",
+    "EV Boost": "The EV weighs 10× more: the car gets its energy before heating gives way.",
+    "Economy": "All weights × 0.3: more willing to accept a slightly cooler room or less charging in expensive hours.",
+  },
+};
+const PCP_THERMAL_HELP = {
+  room: "Average of the room temperature sensors of the heaters in this zone.",
+  loss: "How much heat the zone loses per degree of difference between indoor and outdoor temperature. Lower = better insulated. Example: 60 W/°C at 21 °C inside and 0 °C outside = 1.26 kW.",
+  cap: "How much heat it takes to raise the zone 1 °C (air, furniture, walls). Higher = the room heats up and cools down more slowly, and pre-heating stores more.",
+  tau: "Heat capacity ÷ heat loss: how quickly the room drifts towards the outdoor temperature without heating. A long time constant means pre-heating lasts longer.",
+  hold: "Heat needed to keep 21 °C at the given outdoor temperature (before the heating coefficient – a heat pump uses less electricity).",
+  cool: "How much the room cools in 2 hours without heating, starting at 21 °C with 0 °C outside.",
+  err: "How far the model's prediction was from the measured temperature, smoothed. Falling values mean the model is learning; below ~0.1 °C is good.",
+  samples: "Number of 15-minute steps the model has learned from. Steps are skipped when the window is open or nothing changes (no heating and little indoor–outdoor difference). Learning: < 30 steps, settling: < 200 or error > 0.3 °C, then stable.",
+};
+const PCP_MIN_VALID_V = 100;     // voltages below this are treated as missing
 const PCP_FS_ICON = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" d="M5 5h5v2H7v3H5V5m9 0h5v5h-2V7h-3V5m3 9h2v5h-5v-2h3v-3m-7 3v2H5v-5h2v3h3z"/></svg>';
 const pE = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pN = (v) => (v === null || v === undefined || v === "" || isNaN(Number(v)) ? null : Number(v));
@@ -104,7 +179,7 @@ function pcTsChart(svg, width, o) {
   const xs = (ms) => L + iw * (ms - o.t0) / span;
   let lmax = 0.1, rmin = Infinity, rmax = -Infinity;
   if (o.stacked) for (let i = 0; i < o.bins; i++) { let a = 0; for (const st of o.stacked) a += Math.max(0, st.values[i] ?? 0); lmax = Math.max(lmax, a); }
-  for (const se of o.series || []) for (const [, v] of se.points) { if (se.axis === "r") { rmin = Math.min(rmin, v); rmax = Math.max(rmax, v); } else lmax = Math.max(lmax, v); }
+  for (const se of o.series || []) for (const [, v] of se.points) { if (v === null || v === undefined || isNaN(v)) continue; if (se.axis === "r") { rmin = Math.min(rmin, v); rmax = Math.max(rmax, v); } else lmax = Math.max(lmax, v); }
   lmax = niceMax(lmax * 1.05);
   if (rmin === Infinity) { rmin = 0; rmax = 1; }
   else if (o.rWindow) { rmin = Math.min(o.rWindow[0], Math.floor(rmin - 1)); rmax = Math.max(o.rWindow[1], Math.ceil(rmax + 1)); }
@@ -119,7 +194,10 @@ function pcTsChart(svg, width, o) {
   if (o.yLabel) s += `<text x="${L}" y="${T - 4}" class="tx">${o.yLabel}</text>`;
   if (o.yrLabel && R > 20) s += `<text x="${L + iw}" y="${T - 4}" text-anchor="end" class="tx">${o.yrLabel}</text>`;
   const ticks = o.tickEveryMs || (span <= 2 * 3600e3 ? (W < 500 ? 30 : 15) * 60e3 : (W < 500 ? 6 : 3) * 3600e3);
-  for (let t = Math.ceil(o.t0 / ticks) * ticks; t <= o.t1; t += ticks) s += `<text x="${xs(t)}" y="${Ht - 8}" text-anchor="middle" class="tx">${pHH(new Date(t))}</text>`;
+  const dayTicks = ticks >= 86400e3;
+  let t0t = Math.ceil(o.t0 / ticks) * ticks;
+  if (dayTicks) { const d0 = new Date(o.t0); d0.setHours(24, 0, 0, 0); t0t = d0.getTime(); }   // local midnight
+  for (let t = t0t; t <= o.t1; t += ticks) s += `<text x="${xs(t)}" y="${Ht - 8}" text-anchor="middle" class="tx">${dayTicks ? new Date(t).toLocaleDateString(undefined, { weekday: "short" }) : pHH(new Date(t))}</text>`;
   if (o.stacked && o.bins) {
     const bw = iw / o.bins, base = new Array(o.bins).fill(0);
     for (const st of o.stacked) {
@@ -136,7 +214,13 @@ function pcTsChart(svg, width, o) {
   for (const se of o.series || []) {
     if (!se.points.length) continue;
     const yf = se.axis === "r" ? yr : yl;
-    let d = ""; se.points.forEach(([t, v], i) => { d += `${i ? "L" : "M"}${xs(t).toFixed(1)},${yf(v).toFixed(1)}`; });
+    // null values break the line (missing/invalid data) instead of drawing to 0
+    let d = "", pen = false;
+    se.points.forEach(([t, v]) => {
+      if (v === null || v === undefined || isNaN(v)) { pen = false; return; }
+      d += `${pen ? "L" : "M"}${xs(t).toFixed(1)},${yf(v).toFixed(1)}`; pen = true;
+    });
+    if (!d) continue;
     s += `<path d="${d}" fill="none" stroke="${se.color}" stroke-width="${se.width || 1.3}" opacity=".9"/>`;
   }
   svg.setAttribute("viewBox", `0 0 ${W} ${Ht}`); svg.setAttribute("height", Ht); svg.innerHTML = s;
@@ -307,6 +391,8 @@ class PowerControllerPanel extends HTMLElement {
             Sensors, devices, zones and the full grid-tariff editor (hours, days, capacity steps, new price lists) are under Settings → Devices &amp; services.</div></div>
             <a class="btn" href="/config/integrations/integration/power_controller">Open integration settings</a></div></div>
           <div class="setg" id="setg"></div>
+          <div class="hd" style="margin:18px 0 10px"><div><h2>Thermal models</h2><div class="hint">What Power Controller has learned about each zone (room). The planner uses this to pre-heat at the right time. Values improve over days to weeks.</div></div></div>
+          <div class="setg tzg" id="thz"></div>
         </section>
 
         <section id="v-dv" hidden><div class="hd"><div><h2>Devices</h2><div class="hint">The object cards for everyday dashboards (custom:power-controller-object-card)</div></div></div><div class="dcs" id="cards"></div></section>
@@ -417,13 +503,22 @@ class PowerControllerPanel extends HTMLElement {
   }
   _pct(a, b) { return Math.max(0, Math.min(100, (pN(a) ?? 0) / Math.max(0.01, pN(b) ?? 1) * 100)); }
 
-  /* plan bars for n hours from now: baseload + every device (forecast-only devices lighter) */
+  /* devices in stacking order: not controlled (forecast) first, then plan priority 1, 2, … */
+  _stackOrder(d) {
+    return d.devices.map((x, i) => ({ ...x, i }))
+      .sort((a, b) => (a.forecast_only === b.forecast_only ? 0 : a.forecast_only ? -1 : 1)
+        || (pN(a.plan_priority) ?? 99) - (pN(b.plan_priority) ?? 99) || a.i - b.i);
+  }
+
+  /* plan bars for n hours from now, stacked bottom-up: baseload, devices that are not controlled
+     (forecast, lighter), then committed devices by plan priority – priority 1 at the bottom */
   _planSeries(d, n) {
     const idx = d.plan.index_now, at = (arr, t) => pN((arr || [])[idx + t]) ?? 0;
     const bars = [{ id: "base", name: "Baseload", color: "#94a3b8", values: [...Array(n).keys()].map((t) => at(d.plan.baseload_72h, t)) }];
-    d.devices.forEach((x, i) => {
+    this._stackOrder(d).forEach((x) => {
       if (this._hidden[x.entry_id]) return;
-      bars.push({ id: x.entry_id, name: x.name + (x.forecast_only ? " (forecast)" : ""), color: this._color(i), opacity: x.forecast_only ? 0.4 : 0.92,
+      bars.push({ id: x.entry_id, name: x.forecast_only ? `${x.name} (forecast)` : `#${x.plan_priority} ${x.name}`,
+        color: this._color(x.i), opacity: x.forecast_only ? 0.4 : 0.92,
         values: [...Array(n).keys()].map((t) => at(x.plan_72h, t)) });
     });
     const times = [...Array(n).keys()].map((t) => new Date(new Date(d.plan.start).getTime() + (idx + t) * 3600e3));
@@ -433,7 +528,7 @@ class PowerControllerPanel extends HTMLElement {
   _planTip(d, s) {
     return (t) => {
       const tot = s.bars.reduce((a, b) => a + (pN(b.values[t]) ?? 0), 0);
-      const rows = s.bars.filter((b) => (pN(b.values[t]) ?? 0) > 0.02).map((b) => `<div class="r"><span><i class="sw" style="background:${b.color}"></i> ${pE(b.name)}</span><b class="num">${pF(b.values[t])}</b></div>`).join("");
+      const rows = s.bars.filter((b) => (pN(b.values[t]) ?? 0) > 0.02).reverse().map((b) => `<div class="r"><span><i class="sw" style="background:${b.color}"></i> ${pE(b.name)}</span><b class="num">${pF(b.values[t])}</b></div>`).join("");
       return `<b>${pDay(s.times[t])} ${pHH(s.times[t])}</b><div class="r"><span>Total</span><b class="num">${tot.toFixed(2)} kWh</b></div>
         <div class="r"><span>All-in price</span><b class="num">${pF(s.at(d.plan.price_72h, t))} NOK</b></div>
         <div class="r"><span>Hour allowance</span><span class="num">${pF(s.at(d.plan.hour_cap_72h, t))} kWh</span></div>
@@ -510,9 +605,18 @@ class PowerControllerPanel extends HTMLElement {
     const cc = { L1: "#06b6d4", L2: "#8b5cf6", L3: "#94a3b8" }, vc = { "L1-L2": "#0e7490", "L2-L3": "#6d28d9", "L3-L1": "#64748b" };
     const series = [];
     for (const [ph, id] of Object.entries(he.currents || {})) if (id && h[id]) series.push({ name: `${ph} A`, color: cc[ph], points: h[id].map(([t, v]) => [t, v * this._scale(id)]), width: 1.2 });
-    for (const [lbl, id] of Object.entries(he.voltages || {})) if (id && h[id]) series.push({ name: `${lbl} V`, color: vc[lbl], axis: "r", points: h[id], width: 1 });
+    // voltages below 100 V are treated as missing (dead/faulty sensor) so they cannot squash the 215–230 V window
+    const bad = [];
+    for (const [lbl, id] of Object.entries(he.voltages || {})) {
+      if (!id || !h[id]) continue;
+      const pts = h[id].map(([t, v]) => [t, pN(v) !== null && v >= PCP_MIN_VALID_V ? v : null]);
+      const valid = pts.some(([, v]) => v !== null);
+      if (!valid) bad.push(lbl);
+      series.push({ name: `${lbl} V${valid ? "" : " · no data"}`, color: vc[lbl], axis: "r", points: pts, width: 1, invalid: !valid });
+    }
     pcTsChart(r.getElementById("svg-ph"), this._w("svg-ph"), { t0: now - 24 * 3600e3, t1: now, series, yLabel: "A", yrLabel: "V", height: this._fsH("svg-ph", 210), rWindow: [215, 230] });
-    r.getElementById("lg-ph").innerHTML = series.length ? series.map((x) => `<span class="lg static"><span class="sw" style="background:${x.color}"></span>${x.name}</span>`).join("")
+    r.getElementById("lg-ph").innerHTML = series.length ? series.map((x) => `<span class="lg static${x.invalid ? " bad" : ""}" ${x.invalid ? `title="All values are below ${PCP_MIN_VALID_V} V – check the sensor"` : ""}><span class="sw" style="background:${x.color}"></span>${x.name}</span>`).join("")
+        + (bad.length ? `<span class="hint warnt">⚠ ${bad.join(", ")}: no valid voltage (all values below ${PCP_MIN_VALID_V} V) – check the sensor.</span>` : "")
       : `<span class="hint">No recorder history yet. Voltage sensors are optional (Configure → Sensors and general settings).</span>`;
     r.getElementById("phv").innerHTML = ["L1", "L2", "L3"].map((ph) => `<span>${ph} <b>${pF(d.phases[ph]?.amps, 1)} A</b></span>`).join("");
   }
@@ -652,14 +756,22 @@ class PowerControllerPanel extends HTMLElement {
     const box = this.shadowRoot.getElementById("setg");
     if (!box) return;
     const active = this.shadowRoot.activeElement;
-    if (active && box.contains(active) && ["INPUT", "SELECT"].includes(active.tagName)) return;   // don't disturb typing
+    const typing = active && ["INPUT", "SELECT"].includes(active.tagName);
+    if (!(typing && box.contains(active))) this._renderSettingFields(d, box);
+    const tz = this.shadowRoot.getElementById("thz");
+    if (tz && !(typing && tz.contains(active))) this._renderThermal(d, tz);
+  }
+
+  _help(text, extra = "") {
+    if (!text) return "";
+    return `<span class="hq" tabindex="0" role="button" aria-label="Help"><span aria-hidden="true">?</span><span class="tipbox" role="tooltip">${text}${extra}</span></span>`;
+  }
+
+  _renderSettingFields(d, box) {
     const st = (id) => this._hass?.states?.[id];
-    const name = (id) => {
-      const n = st(id)?.attributes?.friendly_name || id;
-      return n.replace(/^Power Controller /, "");
-    };
-    const field = (id) => {
-      const s = st(id); if (!s) return "";
+    const name = (e) => e.label || (st(e.id)?.attributes?.friendly_name || e.id).replace(/^Power Controller /, "");
+    const field = (e) => {
+      const id = e.id, s = st(id); if (!s) return "";
       const dom = id.split(".")[0], a = s.attributes || {};
       let ctl = "";
       if (dom === "number") {
@@ -673,9 +785,12 @@ class PowerControllerPanel extends HTMLElement {
         const loc = v && !isNaN(v) ? new Date(v.getTime() - v.getTimezoneOffset() * 60000).toISOString().slice(0, 16) : "";
         ctl = `<input type="datetime-local" data-eid="${pE(id)}" value="${loc}">`;
       }
-      return `<label class="sf"><span>${pE(name(id))}<small>${pE(id)}</small></span><span class="sc2">${ctl}</span></label>`;
+      const opts = PCP_OPT_HELP[e.key];
+      const optHtml = opts ? `<dl class="opth">${Object.entries(opts).map(([o, t]) => `<dt${o === s.state ? ' class="cur"' : ""}>${pE(o)}</dt><dd>${t}</dd>`).join("")}</dl>` : "";
+      const cur = opts && opts[s.state] ? `<em class="optcur">${pE(s.state)}: ${opts[s.state]}</em>` : "";
+      return `<label class="sf"><span>${pE(name(e))}${this._help(PCP_HELP[e.key], optHtml)}<small>${pE(id)}</small>${cur}</span><span class="sc2">${ctl}</span></label>`;
     };
-    box.innerHTML = (d.settings || []).map((g) => `<div class="card"><h2>${pE(g.title)}</h2><div class="sfl">${g.entities.map(field).join("")}</div></div>`).join("");
+    box.innerHTML = (d.settings || []).map((g) => `<div class="card"><h2>${pE(g.title)}</h2><div class="sfl">${g.entities.map((e) => field(typeof e === "string" ? { id: e } : e)).join("")}</div></div>`).join("");
     box.querySelectorAll("[data-eid]").forEach((el) => el.addEventListener("change", () => {
       const id = el.dataset.eid, dom = id.split(".")[0];
       if (dom === "number") {
@@ -684,8 +799,87 @@ class PowerControllerPanel extends HTMLElement {
       } else if (dom === "select") this._call("select", "select_option", { entity_id: id, option: el.value });
       else if (dom === "time" && el.value) this._call("time", "set_value", { entity_id: id, time: `${el.value}:00` });
       else if (dom === "datetime" && el.value) this._call("datetime", "set_value", { entity_id: id, datetime: `${el.value.replace("T", " ")}:00` });
-      this._say(`${name(id)} saved`);
+      this._say(`${id} saved`);
     }));
+    this._bindHelp(box);
+  }
+
+  _bindHelp(root) {
+    root.querySelectorAll(".hq").forEach((q) => {
+      const toggle = (ev) => { ev.preventDefault(); ev.stopPropagation(); const o = q.classList.contains("open");
+        root.querySelectorAll(".hq.open").forEach((x) => x.classList.remove("open")); if (!o) q.classList.add("open"); };
+      q.addEventListener("click", toggle);
+      q.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") toggle(ev); if (ev.key === "Escape") q.classList.remove("open"); });
+    });
+  }
+
+  // ------------------------------------------------------------------ THERMAL MODELS
+  _renderThermal(d, box) {
+    const zones = d.thermal_zones || [];
+    if (!zones.length) { box.innerHTML = `<div class="card"><div class="hint">No thermal zones yet.</div></div>`; return; }
+    const ST = { learning: ["Learning", "info"], settling: ["Settling", "warn"], stable: ["Stable", "ok"], manual: ["Manual values", "mut"] };
+    const H = PCP_THERMAL_HELP;
+    const fact = (lbl, help, val, sub = "") => `<div class="tf"><span>${lbl}${this._help(help)}</span><b>${val}</b>${sub ? `<small>${sub}</small>` : ""}</div>`;
+    box.innerHTML = zones.map((z, zi) => {
+      const st = ST[z.status] || ST.learning;
+      const devs = z.devices.length ? z.devices.map((x) => `${pE(x.name)} <small>(${x.heater_kind === "stepless" ? "stepless" : "on/off"}, ×${pF(x.heating_coefficient, 1)})</small>`).join(" · ") : `<span class="hint">no heating devices in this zone</span>`;
+      const seed = z.seed || {};
+      const chg = (cur, base) => { const c = pN(cur), b = pN(base); if (c === null || !b) return ""; const p = (c / b - 1) * 100; return Math.abs(p) < 1 ? "= start value" : `${p > 0 ? "+" : ""}${p.toFixed(0)} % vs. start`; };
+      return `<div class="card tz" data-zone="${pE(z.zone_id)}">
+        <div class="hd"><div><h2>${pE(z.name)}</h2><div class="hint">${pE(z.zone_id)} · ${pF(z.area_m2, 0)} m² · ${pE(z.insulation)}${z.window_sensor ? ` · window ${z.window_open ? "<b>open – learning paused</b>" : "closed"}` : " · no window sensor"}</div></div>
+          <span class="chip c-${st[1]}">${st[0]}</span></div>
+        <div class="hint" style="margin-bottom:10px">Heating: ${devs}</div>
+        <div class="tfs">
+          ${fact("Room now", H.room, z.room_temp === null ? "–" : `${pF(z.room_temp, 1)} °C`)}
+          ${fact("Heat loss", H.loss, `${pF(z.heat_loss_w_per_c, 0)} W/°C`, chg(z.heat_loss_w_per_c, seed.heat_loss_w_per_c))}
+          ${fact("Heat capacity", H.cap, `${pF(z.heat_capacity_kwh_per_c, 2)} kWh/°C`, chg(z.heat_capacity_kwh_per_c, seed.heat_capacity_kwh_per_c))}
+          ${fact("Time constant", H.tau, `${pF(z.time_constant_h, 0)} h`, `start ${pF(seed.time_constant_h, 0)} h`)}
+          ${fact("To hold 21 °C", H.hold, `${pF(z.power_21_at_0_kw, 2)} kW`, `at 0 °C · ${pF(z.power_21_at_minus10_kw, 2)} kW at −10 °C`)}
+          ${fact("Without heat, 2 h", H.cool, `−${pF(z.cooling_2h_c, 1)} °C`, "from 21 °C at 0 °C outside")}
+          ${fact("Prediction error", H.err, z.err_ema_c === null ? "–" : `${pF(z.err_ema_c, 2)} °C`, "typical per 15-min step")}
+          ${fact("Learned from", H.samples, `${z.samples} steps`, `${z.skipped} skipped${z.last_update ? ` · last ${pDay(new Date(z.last_update))} ${pHH(new Date(z.last_update))}` : ""}`)}
+        </div>
+        <div class="chartw"><svg id="svg-tz-${zi}" role="img" aria-label="Learning history"></svg></div>
+        <div class="legend static"><span class="lg static"><span class="sw" style="background:#0e7490"></span>Heat loss W/°C</span><span class="lg static"><span class="sw" style="background:#a8a29e"></span>Time constant h</span><span class="hint" style="align-self:center">last 7 days, one point per hour</span></div>
+        <details class="tzm"><summary>Adjust manually / reset</summary>
+          <div class="hint" style="margin:6px 0 10px">Manual values replace the learned ones and pause learning (you can resume learning later). Reset goes back to the start values from area and insulation and starts learning again.</div>
+          <div class="tzr">
+            <label class="sf"><span>Heat capacity${this._help(H.cap)}</span><span class="sc2"><input type="number" step="0.05" min="0.05" max="100" data-f="cap" value="${pF(z.heat_capacity_kwh_per_c, 2)}"><span class="u">kWh/°C</span></span></label>
+            <label class="sf"><span>Heat loss${this._help(H.loss)}</span><span class="sc2"><input type="number" step="1" min="1" max="2000" data-f="loss" value="${pF(z.heat_loss_w_per_c, 0)}"><span class="u">W/°C</span></span></label>
+          </div>
+          <div class="tzb"><button type="button" class="btn pri" data-a="set">Apply manual values</button>
+            <button type="button" class="btn" data-a="${z.frozen ? "unfreeze" : "freeze"}">${z.frozen ? "Resume learning" : "Pause learning"}</button>
+            <button type="button" class="btn" data-a="reset">Reset to start values</button></div>
+        </details></div>`;
+    }).join("");
+    zones.forEach((z, zi) => {
+      const hist = z.history || [], svg = this.shadowRoot.getElementById(`svg-tz-${zi}`);
+      if (!svg) return;
+      const pts = (k) => hist.map((h) => [new Date(h[0]).getTime(), pN(h[k])]);
+      const t1 = Date.now(), t0 = t1 - 7 * 86400e3;
+      if (hist.length < 2) {
+        svg.style.display = "none";
+        if (!svg.nextElementSibling?.classList?.contains("nohist")) svg.insertAdjacentHTML("afterend", `<div class="hint nohist">Not enough history yet – the model learns every 15 minutes while the window is closed and there is something to learn from (heating, or a clear indoor–outdoor difference).</div>`);
+        return;
+      }
+      pcTsChart(svg, this._w(`svg-tz-${zi}`), { t0, t1, height: 150, yLabel: "W/°C", yrLabel: "h", tickEveryMs: 86400e3,
+        series: [{ name: "loss", color: "#0e7490", points: pts(1), width: 1.6 }, { name: "tau", color: "#a8a29e", axis: "r", points: pts(2), width: 1.2 }] });
+    });
+    box.querySelectorAll(".tz").forEach((card) => {
+      const zid = card.dataset.zone;
+      card.querySelectorAll("[data-a]").forEach((b) => b.addEventListener("click", () => {
+        const a = b.dataset.a, data = { zone_id: zid, action: a };
+        if (a === "reset" && !confirm("Reset the learned model for this zone to the start values?")) return;
+        if (a === "set") {
+          const cap = Number(card.querySelector("[data-f=cap]").value), loss = Number(card.querySelector("[data-f=loss]").value);
+          if (!(cap > 0) || !(loss > 0)) { this._say("Enter positive values"); return; }
+          Object.assign(data, { heat_capacity_kwh_per_c: cap, heat_loss_w_per_c: loss, freeze: true });
+        }
+        this._call("power_controller", "thermal_model", data);
+        this._say(`Thermal model ${zid}: ${a}`);
+      }));
+    });
+    this._bindHelp(box);
   }
 
   // ------------------------------------------------------------------ PLAN
@@ -693,8 +887,9 @@ class PowerControllerPanel extends HTMLElement {
     if (!d) return;
     const r = this.shadowRoot, n = Math.min(this._horizon, 72 - d.plan.index_now);
     const lg = r.getElementById("lg-pl");
-    lg.innerHTML = d.devices.map((x, i) => `<button type="button" class="lg" data-id="${x.entry_id}" aria-pressed="${!this._hidden[x.entry_id]}"><span class="sw" style="background:${this._color(i)};opacity:${x.forecast_only ? 0.45 : 1}"></span>${pE(x.name)}${x.forecast_only ? " · forecast" : ""}</button>`).join("")
-      + `<span class="lg static"><span class="sw" style="background:#94a3b8"></span>Baseload</span><span class="lg static"><span class="sw ln" style="border-color:var(--primary-text-color)"></span>Price</span>`;
+    lg.innerHTML = `<span class="lg static"><span class="sw" style="background:#94a3b8"></span>Baseload</span>`
+      + this._stackOrder(d).map((x) => `<button type="button" class="lg" data-id="${x.entry_id}" aria-pressed="${!this._hidden[x.entry_id]}"><span class="sw" style="background:${this._color(x.i)};opacity:${x.forecast_only ? 0.45 : 1}"></span>${x.forecast_only ? `${pE(x.name)} · forecast` : `#${x.plan_priority} ${pE(x.name)}`}</button>`).join("")
+      + `<span class="lg static"><span class="sw ln" style="border-color:var(--primary-text-color)"></span>Price</span><span class="hint" style="align-self:center">Stacked bottom-up: baseload, not controlled, then priority 1, 2, …</span>`;
     lg.querySelectorAll("button").forEach((b) => b.addEventListener("click", () => { this._hidden[b.dataset.id] = !this._hidden[b.dataset.id]; this._renderPlan(this._data); }));
     const s = this._planSeries(d, n);
     const g = pcBarChart(r.getElementById("svg-pl"), this._w("cw-pl"), { n, times: s.times, bars: s.bars, height: this._fsH("svg-pl", 290), yLabel: "kWh/h", yrLabel: "NOK/kWh",
@@ -762,12 +957,13 @@ class PowerControllerPanel extends HTMLElement {
     }).join("");
     r.getElementById("phchip").innerHTML = worst === "ok" ? `<span class="chip c-ok">All phases OK</span>` : worst === "accepting" ? `<span class="chip c-warn">Accepting overload</span>` : `<span class="chip c-bad">Limiting</span>`;
     // decisions
-    r.getElementById("dtab").innerHTML = `<div class="dt h"><span>Device · reason</span><span>Status</span><span class="num">Live / granted</span></div>` +
+    r.getElementById("dtab").innerHTML = `<div class="dt h"><span>Device · reason</span><span>Status</span><span class="num">Grant kW</span><span class="num">Live kW</span><span class="num">Lent kW</span></div>` +
       d.devices.map((x, i) => {
         const st = PCP_STATUS[x.committed ? x.ui_status : "manual"] || PCP_STATUS.waiting;
-        const why = x.committed ? ({ blocked: "planned, no capacity left", "not planned": "not planned this hour" }[x.dist_reason] || (x.ui_status === "lent" ? "reserved but idle → lent" : x.ui_status === "priority_now" ? "priority now" : "has planned power")) : "not controlled – counted as load";
-        return `<div class="dt"><span><i class="sw" style="background:${this._color(i)}"></i> ${pE(x.name)}<small>${why}</small></span><span><span class="chip c-${st[1]}">${st[0]}</span></span>
-          <span class="num">${pF(x.live_kw)} / ${pF(x.allocated_kw)} kW<small>#${x.dist_priority}</small></span></div>`;
+        const lent = pN(x.lent_kw) ?? 0;
+        const why = x.committed ? ({ blocked: "planned, no capacity left", "not planned": "not planned this hour" }[x.dist_reason] || (x.ui_status === "lent" ? "reserved but idle → lent" : lent > 0 ? "unused part lent to others" : x.ui_status === "priority_now" ? "priority now" : "has planned power")) : "not controlled – counted as load";
+        return `<div class="dt"><span><i class="sw" style="background:${this._color(i)}"></i> ${pE(x.name)}<small>${why} · #${x.dist_priority}</small></span><span><span class="chip c-${st[1]}">${st[0]}</span></span>
+          <span class="num">${pF(x.allocated_kw)}</span><span class="num">${pF(x.live_kw)}</span><span class="num${lent > 0 ? " lentv" : ""}">${lent > 0 ? pF(lent) : "–"}</span></div>`;
       }).join("");
   }
 
@@ -1059,7 +1255,20 @@ class PowerControllerPanel extends HTMLElement {
     .occsel{margin-bottom:12px;display:flex;flex-direction:column;gap:6px}.wrapseg{display:flex;flex-wrap:wrap}
     .wrapseg button{display:inline-flex;align-items:center;gap:6px}.wrapseg button:disabled{opacity:.5;cursor:default}
     .occ .band{height:16px}.occ{margin-bottom:8px}
-    .dt{display:grid;grid-template-columns:minmax(0,1fr) auto 104px;gap:8px;align-items:center;padding:8px 4px;border-top:1px solid var(--divider-color);font-size:13px}
+    .hq{position:relative;display:inline-grid;place-items:center;width:16px;height:16px;margin-left:6px;border-radius:50%;border:1px solid var(--secondary-text-color);color:var(--secondary-text-color);font-size:10.5px;font-weight:700;cursor:help;vertical-align:1px;font-style:normal}
+    .hq:focus-visible{outline:2px solid var(--primary-color)}
+    .tipbox{display:none;position:absolute;z-index:20;left:-8px;top:22px;width:min(340px,78vw);padding:10px 12px;border-radius:10px;background:var(--card-background-color);color:var(--primary-text-color);border:1px solid var(--divider-color);box-shadow:0 8px 24px rgba(0,0,0,.3);font-size:12.5px;font-weight:400;line-height:1.45;text-transform:none;letter-spacing:0;white-space:normal;cursor:auto}
+    .hq:hover .tipbox,.hq:focus .tipbox,.hq.open .tipbox{display:block}
+    .opth{margin:8px 0 0}.opth dt{font-weight:600;margin-top:6px}.opth dt.cur{color:var(--primary-color)}.opth dt.cur::after{content:" (selected)";font-weight:400}.opth dd{margin:1px 0 0;color:var(--secondary-text-color)}
+    .optcur{display:block;font-style:normal;font-size:11.5px;color:var(--secondary-text-color);margin-top:3px;max-width:420px}
+    .tzg{grid-template-columns:repeat(auto-fit,minmax(min(460px,100%),1fr))}
+    .tfs{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px}
+    .tf{background:color-mix(in srgb, var(--primary-text-color) 5%, transparent);border-radius:10px;padding:8px 10px;font-size:12px;color:var(--secondary-text-color)}
+    .tf b{display:block;font-size:16px;color:var(--primary-text-color);margin-top:2px;font-variant-numeric:tabular-nums}.tf small{display:block;font-size:11px}
+    .tzm{margin-top:8px}.tzm summary{cursor:pointer;font-size:13px;font-weight:600}.tzb{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    .lg.bad{border-color:var(--warning-color);color:var(--warning-color)}.warnt{color:var(--warning-color);align-self:center}
+    .dt .lentv{color:var(--info-color, var(--primary-color));font-weight:600}
+    .dt{display:grid;grid-template-columns:minmax(0,1fr) auto 52px 52px 52px;gap:8px;align-items:center;padding:8px 4px;border-top:1px solid var(--divider-color);font-size:13px}
     .dt small{display:block;color:var(--secondary-text-color);font-size:11.5px}.dt.h{border-top:0;font-size:11px;text-transform:uppercase;color:var(--secondary-text-color);font-weight:600}
     .dt .num{text-align:right;font-variant-numeric:tabular-nums}
     .tabs button{font-size:13px;padding:7px 14px}

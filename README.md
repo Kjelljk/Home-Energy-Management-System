@@ -69,14 +69,16 @@ records **plan vs. actual** and runs the **Norgespris vs. spot** shadow evaluati
 ![Distribution module](docs/img/distribution.svg)
 
 **Command patience:** new setpoints/currents are only sent when the change is meaningful
-(EV ≥ 2 A, setpoint ≥ 0.5 °C) and at most every 5 minutes. Reductions go out at once only when the
+(EV ≥ 2 A, setpoint ≥ 0.5 °C) and at most every 5 minutes – every 30 minutes for heaters regulated by
+an external room sensor (heat pumps), whose regulator also has hysteresis. Reductions go out at once only when the
 hour allowance or a phase is at risk. All three values are adjustable.
 
 Every 10 seconds: **grid limiter** (main fuse, internal/external per phase) → **tariff limiter**
 (kWh left this hour) → **overload acceptance** (5 % for 10 min, 20 % for 2 min, ≥ 50 % at once,
 then ramp to rated) → **distribution**. Baseload and devices that are not committed are subtracted
 first. Only planned devices (or *Priority now*) get power; a reservation that is idle (thermostat
-satisfied) is lent to planned-but-blocked devices and taken back immediately when needed.
+satisfied) is lent to planned-but-blocked devices and taken back immediately when needed. A stepless
+heater (heat pump) lends the unused part of its reservation (grant − live − margin).
 
 ## Dashboards
 
@@ -90,7 +92,7 @@ One page per module so it is clear what each part does:
 | **Plan** | 72 h plan (incl. forecast for uncommitted devices), occupancy selector and 7-day schedule, plan vs. actual |
 | **Distribution** | live flow grid → limiters → distribution → devices, incl. lending arrows, phases and the decision per device |
 | **Devices / Priorities** | object cards and drag-and-drop priority order |
-| **Settings** | the values you change often (prices, tariff prices, times, mode, limits, command patience) |
+| **Settings** | the values you change often, each with a "?" explanation; **thermal models** per zone (what has been learned, manual adjustment, reset) |
 
 History comes from the Home Assistant recorder (no extra storage). Plan vs. actual keeps 7 days.
 Every chart has a full-screen button.

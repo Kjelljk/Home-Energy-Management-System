@@ -67,6 +67,7 @@ from .const import (
     CONF_WINDOW_SENSOR,
     CONF_WORKDAY_SENSOR,
     CONF_ZONE_AREA_M2,
+    CONF_ZONE_NAME,
     CONF_ZONE_ID,
     DOMAIN,
     VERSION,
@@ -136,6 +137,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.distributor = PowerDistributor()
 
         self.zones: dict[str, ThermalZoneModel] = {}
+        self.zone_cfg: dict[str, dict] = {}            # name, area, insulation, window sensor
+        self._zones_without_seed: set[str] = set()
         self.zone_windows: dict[str, str | None] = {}
         self.device_entries: dict[str, ConfigEntry] = {}
 
@@ -233,6 +236,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.plan_history = list(saved.get("plan_history", []))[-168:]
         for zid, zdata in saved.get("thermal_zones", {}).items():
             self.zones[zid] = ThermalZoneModel.from_dict(zdata)
+            if zdata.get("seed_alpha") is None:        # stored before 2.10: seed from config below
+                self._zones_without_seed.add(zid)
         self._restore_settings(saved.get("settings", {}))
         self._restore_runtime(saved.get("runtime", {}))
 
@@ -256,11 +261,20 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             key: float(cfg[conf]) for key, conf in OA_CONF_MAP.items() if cfg.get(conf) is not None
         })
         zid = cfg.get(CONF_ZONE_ID, "default_zone")
+        self.zone_cfg.setdefault(zid, {"name": cfg.get(CONF_ZONE_NAME, "Main Living Zone"),
+                                       "area": cfg.get(CONF_ZONE_AREA_M2, 40.0),
+                                       "insulation": cfg.get(CONF_INSULATION_CLASS, InsulationClass.STANDARD),
+                                       "window": cfg.get(CONF_WINDOW_SENSOR)})
         if zid not in self.zones:  # the hub's own initial zone
             alpha, beta = seed_thermal_parameters(
                 cfg.get(CONF_ZONE_AREA_M2, 40.0), cfg.get(CONF_INSULATION_CLASS, InsulationClass.STANDARD)
             )
             self.zones[zid] = ThermalZoneModel(zone_id=zid, alpha=alpha, beta=beta)
+        for z in list(self._zones_without_seed):
+            seed = self.zone_seed(z)
+            if seed and z in self.zones:
+                self.zones[z].seed_alpha, self.zones[z].seed_beta = seed
+        self._zones_without_seed.clear()
 
         self._unsubs += [
             async_track_time_change(self.hass, self._handle_hourly_rollover, minute=0, second=5),
@@ -402,6 +416,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if etype == ENTRY_TYPE_ZONE:
             zid = data.get(CONF_ZONE_ID, entry.entry_id)
             self.zone_windows[zid] = data.get(CONF_WINDOW_SENSOR)
+            self.zone_cfg[zid] = {"name": data.get(CONF_ZONE_NAME, entry.title), "area": data.get(CONF_ZONE_AREA_M2, 30.0),
+                                  "insulation": data.get(CONF_INSULATION_CLASS, InsulationClass.STANDARD),
+                                  "window": data.get(CONF_WINDOW_SENSOR)}
             if zid not in self.zones:
                 alpha, beta = seed_thermal_parameters(
                     data.get(CONF_ZONE_AREA_M2, 30.0), data.get(CONF_INSULATION_CLASS, InsulationClass.STANDARD)
@@ -1197,8 +1214,86 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return plan_index(self.plan_start, now or dt_util.now())
 
     def _planned_setpoint(self, eid: str) -> float | None:
-        sp = value_at(self.plan_slots.setpoints.get(eid), self.slot_idx())
+        """Planned setpoint for the CURRENT CLOCK HOUR (highest quarter of the hour), so the
+        plan changes a device's setpoint at most once per hour even with 15-minute planning."""
+        sp = value_at(self.plan_result.setpoints.get(eid), self.plan_idx())
+        if sp is None:
+            sp = value_at(self.plan_slots.setpoints.get(eid), self.slot_idx())
         return float(sp) if sp is not None else None
+
+    def zone_seed(self, zid: str) -> tuple[float, float] | None:
+        cfg = self.zone_cfg.get(zid)
+        if not cfg:
+            return None
+        return seed_thermal_parameters(cfg.get("area", 30.0), cfg.get("insulation", InsulationClass.STANDARD))
+
+    async def async_thermal_model(self, zone_id: str, action: str, heat_capacity_kwh_per_c: float | None = None,
+                                  heat_loss_w_per_c: float | None = None, freeze: bool | None = None) -> None:
+        """reset | set | freeze | unfreeze a zone's thermal model (service power_controller.thermal_model)."""
+        from .thermodynamics import params_from_physical
+
+        zone = self.zones.get(zone_id)
+        if zone is None:
+            raise ValueError(f"Unknown thermal zone {zone_id}")
+        if action == "reset":
+            seed = self.zone_seed(zone_id)
+            if seed:
+                zone.seed_alpha, zone.seed_beta = seed
+            zone.reset()
+        elif action == "set":
+            cur = zone.summary()
+            alpha, beta = params_from_physical(
+                heat_capacity_kwh_per_c if heat_capacity_kwh_per_c is not None else cur["heat_capacity_kwh_per_c"],
+                heat_loss_w_per_c if heat_loss_w_per_c is not None else cur["heat_loss_w_per_c"])
+            zone.set_manual(alpha, beta, freeze=True if freeze is None else bool(freeze))
+        elif action == "freeze":
+            zone.frozen = True
+        elif action == "unfreeze":
+            zone.frozen = False
+        else:
+            raise ValueError(f"Unknown action {action}")
+        self.schedule_save()
+        await self.async_run_planner()
+        await self.async_request_refresh()
+
+    def thermal_zones_payload(self) -> list[dict]:
+        out = []
+        for zid, zone in self.zones.items():
+            cfg = self.zone_cfg.get(zid, {})
+            devs = [eid for eid in self.device_entries
+                    if self.device_cfg(eid).get(CONF_DEVICE_TYPE) == DeviceType.CLIMATE_HEATING
+                    and (self.device_cfg(eid).get(CONF_ZONE_ID) or "") == zid]
+            temps = [self._read_float(self.device_cfg(e).get(CONF_ROOM_TEMP_SENSOR)) for e in devs]
+            temps = [t for t in temps if t is not None]
+            win = cfg.get("window")
+            wst = self.hass.states.get(win) if win else None
+            pred = None
+            for e in devs:
+                p = self.plan_result.predicted_temps.get(e)
+                if p:
+                    pred = p[:24]
+                    break
+            out.append({
+                "zone_id": zid, "name": cfg.get("name") or zid, "area_m2": cfg.get("area"),
+                "insulation": str(cfg.get("insulation") or ""),
+                "devices": [{"entry_id": e, "name": self.device_entries[e].title,
+                             "heating_coefficient": float(self.device_cfg(e).get(CONF_HEATING_COEFFICIENT, 1.0)),
+                             "heater_kind": self.device_cfg(e).get(CONF_HEATER_KIND, HEATER_ON_OFF)} for e in devs],
+                "room_temp": round(sum(temps) / len(temps), 2) if temps else None,
+                "window_sensor": win, "window_open": bool(wst and wst.state == "on"),
+                "predicted_24h": pred,
+                **zone.summary(),
+            })
+        return out
+
+    def command_interval_s(self, eid: str) -> float:
+        """Minimum time between two commands to a device. Heaters regulated by an external
+        room sensor (PI governor, typically heat pumps) get their own, longer interval to
+        avoid wearing the compressor with frequent setpoint changes."""
+        d = self.device_cfg(eid) if eid in self.device_entries else {}
+        if d.get(CONF_DEVICE_TYPE) == DeviceType.CLIMATE_HEATING and d.get(CONF_ENABLE_PI_GOVERNOR):
+            return self.control.regulated_min_interval_s
+        return self.control.min_interval_s
 
     def urgent_now(self) -> bool:
         """True when a command must go out at once: the hour allowance is about to be
@@ -1211,7 +1306,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         cur = st.attributes.get("temperature") if st else None
         cur_f = float(cur) if cur is not None else None
         if not should_send_command(cur_f, temp, self._last_switch_ts.get(eid), now,
-                                   self.control.temp_min_delta_c, self.control.min_interval_s,
+                                   self.control.temp_min_delta_c, self.command_interval_s(eid),
                                    urgent=force, lower_is_relief=True):
             return
         if await self._safe_call("climate", "set_temperature", {"entity_id": entity, "temperature": temp}):
@@ -1355,6 +1450,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             window_open = bool(win and self.hass.states.get(win) and self.hass.states.get(win).state == "on")
             prev = self._last_zone_sample.get(zid)
             if prev is None or window_open:
+                if window_open:
+                    zone.skipped += 1
                 self._last_zone_sample[zid] = (now, t_curr)
                 continue
             dt_h = (now - prev[0]).total_seconds() / 3600.0
@@ -1363,7 +1460,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.get_device_live_power_kw(e) * float(self.device_cfg(e).get(CONF_HEATING_COEFFICIENT, 1.0))
                     for e in zone_devs
                 )
-                zone.update_rls(prev[1], t_curr, t_out, heat_kw, dt_h, window_open=False)
+                zone.update_rls(prev[1], t_curr, t_out, heat_kw, dt_h, window_open=False, now=now)
                 self._last_zone_sample[zid] = (now, t_curr)
 
         for eid in self.device_entries:
@@ -1408,7 +1505,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         last = (self._last_ocpp_cmd_ts.get(eid) if dtype == DeviceType.EV_CHARGER else None) or self._last_switch_ts.get(eid)
         hold_s = 0
         if last is not None:
-            min_s = MIN_RELAY_SWITCH_SECONDS if dtype == DeviceType.SWITCH else self.control.min_interval_s
+            min_s = MIN_RELAY_SWITCH_SECONDS if dtype == DeviceType.SWITCH else self.command_interval_s(eid)
             hold_s = max(0, int(min_s - (dt_util.now() - last).total_seconds()))
         now = dt_util.now()
         committed = self.committed.get(eid, False)
@@ -1480,6 +1577,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "dist_reason": reason,
             "ui_status": ui_status(committed, pnow, status if committed else None, reason, live, self.warning_active),
             "allocated_kw": alloc.allowed_kw if alloc else 0.0,
+            "lent_kw": round(alloc.lent_kw, 3) if alloc else 0.0,
             "live_kw": round(live, 3),
             "nominal_kw": float(d.get(CONF_NOMINAL_POWER_KW, 0.0)),
             "phase_pair": d.get(CONF_PHASE_PAIR, PhasePair.L1_L2),
@@ -1534,17 +1632,18 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             ("House", [("select", "mode"), ("select", "occupancy_select"), ("select", "priority_profile"),
                        ("datetime", "arrival_time"), ("datetime", "departure_time"),
                        ("number", "baseload_24h"), ("number", "baseload_daytime")]),
-            ("Limits & command patience", [("number", "internal_limit"), ("number", "cmd_interval"),
+            ("Limits & command patience", [("number", "internal_limit"), ("number", "cmd_interval"), ("number", "regulated_interval"),
                                            ("number", "ev_min_step"), ("number", "setpoint_min_step"),
                                            ("number", "ev_delay_penalty")]),
         ]
         version = self.price_engine.tariff_version()
         out = []
         for title, items in groups:
-            ids = [ent(dom, key) for dom, key in items]
+            ids = [{"id": ent(dom, key), "key": key} for dom, key in items]
             if title.startswith("Grid tariff"):
-                ids += [self.own_entity_id("number", f"{hub}_grid_period_{p.id}") for p in version.periods]
-            out.append({"title": title, "entities": [i for i in ids if i]})
+                ids += [{"id": self.own_entity_id("number", f"{hub}_grid_period_{p.id}"), "key": "grid_period",
+                         "label": f"Grid price {p.name}"} for p in version.periods]
+            out.append({"title": title, "entities": [i for i in ids if i["id"]]})
         return out
 
     def _last_command_info(self, eid: str) -> dict | None:
@@ -1667,7 +1766,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             a = self.device_attributes(eid)
             devices.append({k: a.get(k) for k in (
                 "entry_id", "name", "device_type", "committed", "priority_now", "plan_priority", "dist_priority",
-                "ui_status", "live_kw", "allocated_kw", "nominal_kw", "phase_pair", "next_action", "hold_remaining_s",
+                "ui_status", "live_kw", "allocated_kw", "lent_kw", "nominal_kw", "phase_pair", "next_action", "hold_remaining_s",
                 "current_temp", "comfort_temp", "eco_temp", "nominal_temp", "soc", "target_soc", "finish_by",
                 "runtime_required_h", "runtime_today_h", "energy_today_kwh", "entities", "forecast_only",
                 "governor", "governor_enabled", "dist_status", "dist_reason")})
@@ -1717,6 +1816,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "control": self.control.to_dict(),
             "urgent": self.urgent_now(),
             "settings": self._settings_entities(),
+            "thermal_zones": self.thermal_zones_payload(),
             "kpi": {
                 "grid_power_kw": round(self.grid_power_kw, 3),
                 "limit_now_kw": self.limit_now_kw,
