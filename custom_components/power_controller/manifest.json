@@ -1,6 +1,9 @@
 {
   "domain": "power_controller",
   "name": "Power Controller",
+  "after_dependencies": [
+    "recorder"
+  ],
   "codeowners": [
     "@Kjelljk"
   ],
