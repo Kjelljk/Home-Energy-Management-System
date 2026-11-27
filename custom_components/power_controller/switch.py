@@ -14,7 +14,7 @@ from datetime import timedelta
 
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN, ENTRY_TYPE_DEVICE, ENTRY_TYPE_HUB
+from .const import CONF_DEVICE_TYPE, DOMAIN, DeviceType, ENTRY_TYPE_DEVICE, ENTRY_TYPE_HUB
 from .coordinator import PowerControllerCoordinator, get_hub_coordinator
 
 
@@ -31,12 +31,13 @@ async def async_setup_entry(
         return
     if entry.data.get("entry_type") != ENTRY_TYPE_DEVICE:
         return
-    async_add_entities(
-        [
-            DeviceCommittedSwitch(coordinator, entry),
-            DevicePriorityNowSwitch(coordinator, entry),
-        ]
-    )
+    entities: list[SwitchEntity] = [
+        DeviceCommittedSwitch(coordinator, entry),
+        DevicePriorityNowSwitch(coordinator, entry),
+    ]
+    if entry.data.get(CONF_DEVICE_TYPE) == DeviceType.EV_CHARGER.value:
+        entities += [EvDeadlineSwitch(coordinator, entry), EvMinSocSwitch(coordinator, entry)]
+    async_add_entities(entities)
 
 
 class _DeviceBaseSwitch(CoordinatorEntity[PowerControllerCoordinator], SwitchEntity):
@@ -124,3 +125,49 @@ class HomeOfficeSwitch(CoordinatorEntity[PowerControllerCoordinator], SwitchEnti
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         await self.coordinator.async_set_home_office(self._day(), False)
+
+
+class EvDeadlineSwitch(_DeviceBaseSwitch):
+    """On: charge to the target by the 'finish by' time. Off: no deadline – charge as cheaply
+    as possible within the 72-hour horizon (sooner is preferred, see EV Delay Penalty)."""
+
+    _attr_icon = "mdi:clock-end"
+
+    def __init__(self, coordinator: PowerControllerCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "deadline_enabled")
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.ev_deadline_enabled.get(self._eid, True)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self.coordinator.ev_deadline_enabled[self._eid] = True
+        await self.coordinator.async_settings_changed(reprice=False)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self.coordinator.ev_deadline_enabled[self._eid] = False
+        await self.coordinator.async_settings_changed(reprice=False)
+
+
+class EvMinSocSwitch(_DeviceBaseSwitch):
+    """Minimum state of charge within 24 h of plugging in (the deadline is fixed per session)."""
+
+    _attr_icon = "mdi:battery-clock-outline"
+
+    def __init__(self, coordinator: PowerControllerCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator, entry, "min_soc_enabled")
+
+    @property
+    def is_on(self) -> bool:
+        return self.coordinator.ev_min_soc_enabled.get(self._eid, True)
+
+    async def async_turn_on(self, **kwargs: Any) -> None:
+        self.coordinator.ev_min_soc_enabled[self._eid] = True
+        if self.coordinator._ev_was_connected.get(self._eid):
+            # switched on during a session: 24 h from now (never earlier than from plug-in)
+            self.coordinator.ev_min_since[self._eid] = dt_util.now()
+        await self.coordinator.async_settings_changed(reprice=False)
+
+    async def async_turn_off(self, **kwargs: Any) -> None:
+        self.coordinator.ev_min_soc_enabled[self._eid] = False
+        await self.coordinator.async_settings_changed(reprice=False)

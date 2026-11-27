@@ -72,7 +72,8 @@
           "ev_connected_sensor": "EV Connected Binary Sensor",
           "ev_soc_sensor": "EV Battery SoC Sensor (%)",
           "ev_conn_id": "OCPP Connector ID",
-          "comfort_during": "Comfort temperature during"
+          "comfort_during": "Comfort temperature during",
+          "heater_kind": "Heater type"
         }
       }
     }
@@ -118,7 +119,8 @@
           "zone_area_m2": "Floor Area [m²]",
           "insulation_class": "Insulation Class",
           "window_sensor": "Window/Door sensor (optional – pauses thermal learning when open)",
-          "comfort_during": "Comfort temperature during"
+          "comfort_during": "Comfort temperature during",
+          "heater_kind": "Heater type"
         }
       },
       "hub_settings": {

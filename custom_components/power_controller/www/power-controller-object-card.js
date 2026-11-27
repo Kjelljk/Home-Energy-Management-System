@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.8.0";
+const PC_CARD_VERSION = "2.9.0";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -160,8 +160,8 @@ class PowerControllerObjectCard extends HTMLElement {
     const fmt = (st) => (st ? (this._hass.formatEntityState ? this._hass.formatEntityState(st) : st.state) : "");
     if (t === "ev_charger") {
       const soc = pcNum(a.soc);
-      const fin = a.finish_by ? pcHHMM(new Date(a.finish_by)) : null;
-      return `${soc === null ? "–" : soc.toFixed(0)} % · target ${pcNum(this._val("target_soc", a.target_soc)) ?? "–"} %${fin ? ` by ${fin}` : ""}${a.connected === false ? " · unplugged" : ""}`;
+      const fin = a.deadline_enabled !== false && a.finish_by ? pcHHMM(new Date(a.finish_by)) : null;
+      return `${soc === null ? "–" : soc.toFixed(0)} % · target ${pcNum(this._val("target_soc", a.target_soc)) ?? "–"} %${fin ? ` by ${fin}` : " · no deadline"}${a.connected === false ? " · unplugged" : ""}`;
     }
     if (t === "switch") return `${ctrl ? fmt(ctrl) : "–"} · ${(pcNum(a.live_kw) ?? 0).toFixed(1)} kW`;
     const cur = pcNum(ctrl?.attributes?.current_temperature) ?? pcNum(a.current_temp);
@@ -203,7 +203,7 @@ class PowerControllerObjectCard extends HTMLElement {
       return `Runtime today <b>${done.toFixed(1)} of ${req.toFixed(0)} h</b>${n ? ` · ${n.running_now ? "running until" : "next"} ${n.running_now ? `<b>${pcHHMM(new Date(n.end))}</b>` : span}` : ""}`;
     }
     if (t === "ev_charger") {
-      const fin = a.finish_by ? ` · ready <b>${pcHHMM(new Date(a.finish_by))}</b>` : "";
+      const fin = a.deadline_enabled !== false && a.finish_by ? ` · ready <b>${pcHHMM(new Date(a.finish_by))}</b>` : " · no deadline (cheapest, as soon as sensible)";
       if (!n) return `No charging planned${fin}`;
       return `${n.running_now ? "Charging now until" : "Charging"} ${n.running_now ? `<b>${pcHHMM(new Date(n.end))}</b>` : span}${fin}`;
     }
@@ -246,7 +246,8 @@ class PowerControllerObjectCard extends HTMLElement {
     }
     o += `<line class="cur" x1="0" x2="0" y1="0" y2="${H}" style="opacity:0"/>`;
     const labels = [0, 6, 12, 18, 24].map((h) => (h === 0 ? "Now" : pcHHMM(new Date(start.getTime() + h * 3600e3))));
-    const legend = `<span><i class="lb"></i>kWh per hour${forecast ? " · forecast (not controlled)" : " · planned"}</span>${hasSp ? `<span><i class="ll"></i>setpoint °C</span>` : ""}`;
+    const kind = a.heater_kind ? ` · ${a.heater_kind === "stepless" ? "stepless" : "on/off"}` : "";
+    const legend = `<span><i class="lb"></i>kWh per hour${forecast ? " · forecast (not controlled)" : " · planned"}${kind}</span>${hasSp ? `<span><i class="ll"></i>setpoint °C</span>` : ""}`;
     return `<div class="strip"><div class="sh">${legend}<b class="tipv" aria-live="polite"></b></div>
       <svg class="chart" viewBox="0 0 ${W} ${H}" role="img" aria-label="Planned kWh per hour, next 24 hours" data-act="strip">${o}</svg>
       <div class="sl" style="padding-left:${(L / W) * 100}%;padding-right:${(R / W) * 100}%">${labels.map((l) => `<span>${l}</span>`).join("")}</div>
@@ -307,11 +308,15 @@ class PowerControllerObjectCard extends HTMLElement {
         f = `<div><div class="socb"><i style="width:${soc ?? 0}%"></i><em style="left:${tgt}%"></em></div>
              <div class="sl"><span>${soc === null ? "–" : soc.toFixed(0)} % now</span><span>target ${tgt} %</span></div></div>
              <div class="row2">${e.target_soc ? this._stepper("target_soc", tgt, "%", "Target", 0) : ""}
-             ${e.finish_by ? `<label class="sel"><ha-icon icon="mdi:clock-check-outline"></ha-icon><span class="sr">Ready by</span><input type="time" data-act="finish" value="${fin}" aria-label="Ready by"></label>` : ""}</div>`;
+             ${e.finish_by ? `<label class="sel${a.deadline_enabled === false ? " dim" : ""}"><ha-icon icon="mdi:clock-check-outline"></ha-icon><span class="sr">Ready by</span><input type="time" data-act="finish" value="${fin}" aria-label="Ready by" ${a.deadline_enabled === false ? "disabled" : ""}></label>` : ""}</div>
+             <div class="chips">${e.deadline_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="deadline_enabled" aria-pressed="${a.deadline_enabled !== false}"><ha-icon icon="mdi:clock-end"></ha-icon>${a.deadline_enabled !== false ? "Deadline on" : "No deadline"}</button>` : ""}
+             ${e.min_soc_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="min_soc_enabled" aria-pressed="${!!a.min_soc_enabled}"><ha-icon icon="mdi:battery-clock-outline"></ha-icon>Min ${pcNum(a.min_soc) ?? 30} %${a.min_soc_enabled && a.min_soc_deadline ? ` by ${new Date(a.min_soc_deadline).toLocaleDateString(undefined, { weekday: "short" })} ${pcHHMM(new Date(a.min_soc_deadline))}` : a.min_soc_enabled ? " within 24 h" : " off"}</button>` : ""}</div>`;
       }
     }
     const hold = pcNum(a.hold_remaining_s) ?? 0;
-    const holdTxt = hold > 0 ? `Anti-cycling ${Math.floor(hold / 60)}:${String(hold % 60).padStart(2, "0")}` : `Plan #${a.plan_priority ?? "–"}`;
+    const lc = a.last_command;
+    const lcTxt = lc && lc.value !== null && lc.value !== undefined ? ` · last command ${Number(lc.value).toFixed(lc.unit === "A" ? 0 : 1)} ${lc.unit} ${pcHHMM(new Date(lc.ts))}` : "";
+    const holdTxt = (hold > 0 ? `Next change allowed in ${Math.floor(hold / 60)}:${String(hold % 60).padStart(2, "0")}` : `Plan #${a.plan_priority ?? "–"}`) + lcTxt;
     return `${this._stripHtml(a)}${this._governorHtml(a)}${f ? `<div class="feat">${f}</div>` : ""}
       <div class="acts"><button type="button" class="pn" data-act="pnow" aria-pressed="${!!a.priority_now}" ${e.priority_now ? "" : "disabled"}>
       <ha-icon icon="mdi:lightning-bolt"></ha-icon>Priority now</button><span class="hint">${holdTxt}</span></div>`;
@@ -406,6 +411,7 @@ class PowerControllerObjectCard extends HTMLElement {
         if (act === "more") this._moreInfo(this._controlId() || this._config.entity);
         else if (act === "commit") this._toggle(e.committed);
         else if (act === "pnow") this._toggle(e.priority_now);
+        else if (act === "tog") this._toggle(e[el.dataset.key]);
         else if (act === "seg") this._onSegment(el.dataset.key, el.dataset.v, ctrl);
         else if (act === "step") this._onStep(el.dataset.key, Number(el.dataset.d), a, ctrl);
       });
@@ -522,6 +528,10 @@ class PowerControllerObjectCard extends HTMLElement {
       .socb i{position:absolute;top:0;bottom:0;left:0;background:var(--c);border-radius:6px}
       .socb em{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ink)}
       .warn{padding:8px;color:var(--error-color);font-size:13px}
+      .chips{display:flex;gap:6px;flex-wrap:wrap}
+      .chip2{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12px;border-radius:999px;padding:6px 11px;cursor:pointer;border:1px solid var(--divider-color);background:transparent;color:var(--mut);--mdc-icon-size:15px}
+      .chip2[aria-pressed=true]{color:var(--c);border-color:color-mix(in srgb, var(--c) 50%, transparent);background:color-mix(in srgb, var(--c) 12%, transparent);font-weight:600}
+      .sel.dim{opacity:.5}
       .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
       @container (max-width:370px){.badge .bt{display:none}.badge{padding:6px}}
     </style>`;

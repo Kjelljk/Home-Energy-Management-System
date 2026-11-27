@@ -19,7 +19,7 @@ comfort and staying within the capacity step and the main fuse / phase currents.
 | Module | Runs | Question it answers | Main output |
 |---|---|---|---|
 | **1 · Price** | hourly and when new prices arrive | What does one kWh cost in each of the next 72 hours? | all-in price per hour, hour allowance (capacity step) |
-| **2 · Plan** | hourly at :59 and on every change | When should each device use energy, given prices, comfort and limits? | kWh per hour and setpoint per device for 72 h |
+| **2 · Plan** | hourly at :59 and on every change | When should each device use energy, given prices, comfort and limits? | power and setpoint per device in 15-minute slots for 72 h |
 | **3 · Distribution** | every 10 seconds | How much may each device use *right now* without exceeding the hour or a phase? | power per device, actuation of the devices |
 
 A fourth background part learns the thermal behaviour of each room, tracks the legionella cycle,
@@ -42,8 +42,13 @@ records **plan vs. actual** and runs the **Norgespris vs. spot** shadow evaluati
 ### 2 · Plan
 ![Plan module](docs/img/plan.svg)
 
-- A linear optimisation (HiGHS) over 72 hours with a self-learning temperature model per room,
-  pre-heating, EV deadlines, hot-water tank/quota, legionella and switch runtimes.
+- A linear optimisation (HiGHS) over 72 hours in **15-minute slots** (Nord Pool quarter prices) with
+  a self-learning temperature model per room, pre-heating, EV deadlines, hot-water tank/quota,
+  legionella and switch runtimes. The capacity charge is enforced per clock hour.
+- **EV:** charge to the target by a deadline, or with *no deadline* (cheapest within 72 h with a
+  small cost per hour of delay). Optional **minimum state of charge** (default 30 %) within 24 h of
+  plugging in – fixed per session.
+- **Heater type:** stepless (modulating, e.g. heat pump) or on/off (panel heater, cable).
 - **All controllable devices are included.** Devices that are *not committed* (not controlled) are
   added as a flat, never-shifted forecast so the plan and limits reflect the real consumption:
   heating holds its own setpoint, hot water/switches use their daily amount spread over the day,
@@ -63,6 +68,10 @@ records **plan vs. actual** and runs the **Norgespris vs. spot** shadow evaluati
 ### 3 · Distribution
 ![Distribution module](docs/img/distribution.svg)
 
+**Command patience:** new setpoints/currents are only sent when the change is meaningful
+(EV ≥ 2 A, setpoint ≥ 0.5 °C) and at most every 5 minutes. Reductions go out at once only when the
+hour allowance or a phase is at risk. All three values are adjustable.
+
 Every 10 seconds: **grid limiter** (main fuse, internal/external per phase) → **tariff limiter**
 (kWh left this hour) → **overload acceptance** (5 % for 10 min, 20 % for 2 min, ≥ 50 % at once,
 then ramp to rated) → **distribution**. Baseload and devices that are not committed are subtracted
@@ -81,8 +90,10 @@ One page per module so it is clear what each part does:
 | **Plan** | 72 h plan (incl. forecast for uncommitted devices), occupancy selector and 7-day schedule, plan vs. actual |
 | **Distribution** | live flow grid → limiters → distribution → devices, incl. lending arrows, phases and the decision per device |
 | **Devices / Priorities** | object cards and drag-and-drop priority order |
+| **Settings** | the values you change often (prices, tariff prices, times, mode, limits, command patience) |
 
 History comes from the Home Assistant recorder (no extra storage). Plan vs. actual keeps 7 days.
+Every chart has a full-screen button.
 
 ### Object card (everyday dashboards)
 Loaded automatically – add **Power Controller object** in the dashboard editor or:

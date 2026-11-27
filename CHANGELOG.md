@@ -1,5 +1,48 @@
 # Changelog
 
+## 2.9.0
+
+### 15-minute planning
+- The planner works in 15-minute slots over the whole 72 hours (288 slots) using the Nord Pool
+  quarter prices. The capacity charge is still enforced per clock hour (sum of the four quarters
+  ≤ hour allowance), as the grid operator bills it. Hourly inputs are expanded to quarters.
+- Temperatures are now explicit state variables (sparse model): 10 heaters + EV in ~0.3 s.
+- The real-time loop uses the current quarter of the plan; the dashboards keep the hourly view
+  (kWh per hour). The Price page shows 15-minute prices.
+
+### Command patience
+- New setpoints / charging currents are only sent when the change is meaningful (EV ≥ 2 A,
+  setpoint ≥ 0.5 °C) and at most every 5 minutes. Reductions go out at once only when the hour
+  allowance or a phase is at risk; increases are always patient. Common settings as number
+  entities: *Command Minimum Interval*, *EV Current Minimum Step*, *Setpoint Minimum Step*.
+- The object card shows the last command and when the next change is allowed.
+
+### EV: no deadline and minimum state of charge
+- New switch *Deadline enabled* per EV. Off = no deadline: charge to the target as cheaply as
+  possible within 72 h, with a small cost per hour of delay (*EV Delay Penalty*, default
+  2 øre/kWh/h) so it does not wait days for a few øre.
+- New *Minimum state of charge* (default 30 %, switch + number): reached within 24 h of plugging
+  in. The deadline is fixed per session (or from when it was switched on), so it cannot slide.
+
+### Heater type
+- Heating devices have a *Heater type*: **stepless** (modulates, e.g. heat pump) or **on/off**
+  (full power or nothing). The distribution grants stepless heaters part-load power, assumes
+  on/off heaters at full power, and detects idle reservations accordingly.
+
+### Dashboards
+- Full-screen button on every chart and on the power-flow diagram.
+- Distribution flow: limiters in the left half, devices in the right half; connections run in the
+  gap between them and are drawn below the boxes. Lending arcs on the right.
+- Phase chart: voltage axis fixed to 215–230 V and widened only when a phase leaves the window.
+- New **Settings** page in the panel for the values you change often (price model and rates,
+  grid-tariff prices, times, mode/occupancy, baseload, limits and command patience) with full
+  entity IDs; link to the integration for sensors, devices and the full tariff editor.
+
+### Tests
+- 9 new tests (81 total): quarter prices, hour cap with quarters, quarter vs. hourly steady state,
+  planner speed at 288 slots, EV without deadline, minimum SoC, fixed session deadline,
+  command patience, stepless vs. on/off distribution.
+
 ## 2.8.0
 
 ### Plan includes every device

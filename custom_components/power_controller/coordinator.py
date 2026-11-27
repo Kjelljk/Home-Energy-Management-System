@@ -35,6 +35,8 @@ from .const import (
     CONF_DEVICE_TYPE,
     CONF_ECO_TEMP_ENTITY,
     CONF_ENABLE_PI_GOVERNOR,
+    CONF_HEATER_KIND,
+    HEATER_ON_OFF,
     CONF_EV_AVAILABILITY_SWITCH,
     CONF_EV_BATTERY_KWH,
     CONF_EV_CHARGE_SWITCH,
@@ -92,7 +94,8 @@ from .const import (
 from .distributor import PowerDistributor
 from .limiters import GridAndTariffLimiters
 from .overload import OAParams
-from .planner import EnergyPlanner, PlanResult
+from .planner import EnergyPlanner, PlanResult, aggregate_hourly
+from .actuation import ControlSettings, should_send_command, ev_min_soc_deadline
 from .grid_tariff import GridTariffSchedule
 from .price_engine import EnergyPriceEngine, PriceSeries72h, build_workday_mask, is_norwegian_workday
 from .card_model import next_action, plan_index, plan_window, ui_status, value_at
@@ -178,6 +181,19 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.safe_mode_active: bool = False
         self.last_plan_ts: datetime | None = None
         self.plan_start: datetime | None = None   # timestamp of index 0 in plans_72h
+        # 15-minute plan (kW per slot) used by the real-time loop; plans_72h is the hourly view
+        self.plans_15m: dict[str, list[float | None]] = {}
+        self.plan_slots: PlanResult = PlanResult()
+        self.plan_spp: int = 4
+        self._spot_quarters: list[float | None] = []
+        # command patience & EV options (persisted)
+        self.control = ControlSettings()
+        self.ev_deadline_enabled: dict[str, bool] = {}
+        self.ev_min_soc_enabled: dict[str, bool] = {}
+        self.ev_min_soc: dict[str, float] = {}
+        self.ev_session_start: dict[str, datetime | None] = {}
+        self.ev_min_since: dict[str, datetime | None] = {}
+        self._ev_was_connected: dict[str, bool] = {}
         self._entity_cache: dict[tuple[str, str], str | None] = {}
 
         # trackers
@@ -292,6 +308,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if "priority_profile" in settings:
             self.priority_profile = PriorityProfile(settings["priority_profile"])
         self.occupancy = OccupancyProfile.from_dict(settings.get("occupancy"))
+        self.control = ControlSettings.from_dict(settings.get("control"))
 
     def _restore_runtime(self, rt: dict[str, Any]) -> None:
         def _dt(val: str | None) -> datetime | None:
@@ -305,6 +322,12 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.target_soc.update({k: float(v) for k, v in rt.get("target_soc", {}).items()})
         self.finish_by.update({k: _dt(v) for k, v in rt.get("finish_by", {}).items()})
         self.runtime_hours.update({k: float(v) for k, v in rt.get("runtime_hours", {}).items()})
+        self.ev_deadline_enabled.update({k: bool(v) for k, v in rt.get("ev_deadline_enabled", {}).items()})
+        self.ev_min_soc_enabled.update({k: bool(v) for k, v in rt.get("ev_min_soc_enabled", {}).items()})
+        self.ev_min_soc.update({k: float(v) for k, v in rt.get("ev_min_soc", {}).items()})
+        self.ev_session_start.update({k: _dt(v) for k, v in rt.get("ev_session_start", {}).items()})
+        self.ev_min_since.update({k: _dt(v) for k, v in rt.get("ev_min_since", {}).items()})
+        self._ev_was_connected.update({k: bool(v) for k, v in rt.get("ev_connected", {}).items()})
         sel = rt.get("occupancy_selected")
         self.occupancy_selected = sel if sel in OCC_SELECT_OPTIONS else None
 
@@ -329,6 +352,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "priority_profile": self.priority_profile.value,
             "grid_tariff": pe.grid_tariff.to_list(),
             "occupancy": self.occupancy.to_dict(),
+            "control": self.control.to_dict(),
         }
         iso = lambda v: v.isoformat() if v else None  # noqa: E731
         d["runtime"] = {
@@ -341,6 +365,12 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "finish_by": {k: iso(v) for k, v in self.finish_by.items()},
             "runtime_hours": dict(self.runtime_hours),
             "occupancy_selected": self.occupancy_selected,
+            "ev_deadline_enabled": dict(self.ev_deadline_enabled),
+            "ev_min_soc_enabled": dict(self.ev_min_soc_enabled),
+            "ev_min_soc": dict(self.ev_min_soc),
+            "ev_session_start": {k: iso(v) for k, v in self.ev_session_start.items()},
+            "ev_min_since": {k: iso(v) for k, v in self.ev_min_since.items()},
+            "ev_connected": dict(self._ev_was_connected),
         }
         d["hour"] = {"key": self._hour_key, "meter_start": self._hour_start_meter_kwh,
                      "device_kwh": dict(self._hour_dev_kwh)}
@@ -388,6 +418,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.target_soc.setdefault(eid, 80.0)
             self.finish_by.setdefault(eid, None)
             self.runtime_hours.setdefault(eid, 2.0)
+            self.ev_deadline_enabled.setdefault(eid, True)
+            self.ev_min_soc_enabled.setdefault(eid, True)
+            self.ev_min_soc.setdefault(eid, 30.0)
 
     def unregister_subentry(self, entry_id: str) -> None:
         for store in (self.device_entries, self.committed, self.priority_now, self.plan_priority,
@@ -443,6 +476,10 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return max(0.0, live)
         alloc = self.allocations.get(entry_id)
         if alloc and alloc.allowed_kw > 0 and alloc.status != DistStatus.REDISTRIBUTING:
+            # without a power sensor: on/off devices are assumed at full power, stepless
+            # devices at the power they were granted
+            if d.get(CONF_HEATER_KIND) == "stepless":
+                return float(alloc.allowed_kw)
             return float(d.get(CONF_NOMINAL_POWER_KW, 0.0))
         return 0.0
 
@@ -675,6 +712,16 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         today = _vals(st.attributes.get("raw_today") or st.attributes.get("today"))
         tomorrow = _vals(st.attributes.get("raw_tomorrow") or st.attributes.get("tomorrow"))
+        scale = 0.01 if ("øre" in str(st.attributes.get("unit_of_measurement", "")).lower()
+                         or "ore" in str(st.attributes.get("unit_of_measurement", "")).lower()
+                         or (today and max(today) > 30)) else 1.0
+
+        def _quarters(day: list[float]) -> list[float | None]:
+            if len(day) >= 90:              # 15-minute prices (92/96/100 on DST days)
+                return [v * scale for v in day[:96]] + [None] * max(0, 96 - len(day))
+            return [None] * 96              # hourly only -> the planner uses the hourly price
+        q = _quarters(today) + (_quarters(tomorrow) if tomorrow else [])
+        self._spot_quarters = q[now.hour * 4:]
         if len(today) >= 90:
             today = self.price_engine.average_quarter_hourly_prices(today)
         if len(tomorrow) >= 90:
@@ -710,6 +757,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             workday_mask_72h=workday_mask,
             monthly_kwh_used=self.price_engine.monthly_energy_kwh + self.energy_this_hour_kwh,
             expected_load_kwh_72h=expected,
+            spot_quarters=self._spot_quarters,
         )
         self.async_set_updated_data(self._build_state_snapshot())
 
@@ -748,25 +796,53 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         specs = [self._device_spec(eid, masks) for eid in self.device_entries]
         caps = self.price_engine.hourly_cap_series_72h(now)
+        prices = self.price_series.total_price_15m or self.price_series.total_price_72h
         result_plans = await self.hass.async_add_executor_job(
             lambda: self.planner.optimize_72h(
-                now, self.mode, self.price_series.total_price_72h, outdoor, self.baseload_72h,
+                now, self.mode, prices, outdoor, self.baseload_72h,
                 self.price_engine.active_tariff_kw,
                 min(self.limiters.effective_phase_limits_a().values()),
                 specs, self.arrival_time, self.departure_time, caps, self.priority_profile,
+                ev_delay_penalty=self.control.ev_delay_penalty_nok,
             )
         )
-        self.plan_result = self.planner.last_result
-        self.plans_72h = result_plans
+        self._apply_plan_result(self.planner.last_result, result_plans)
         self.plan_start = now
         self.last_plan_ts = dt_util.now()
         self.total_plan_72h = [
-            round(self.baseload_72h[t] + sum(float(p[t]) for p in result_plans.values() if t < len(p) and p[t] is not None), 3)
+            round(self.baseload_72h[t] + sum(float(p[t]) for p in self.plans_72h.values() if t < len(p) and p[t] is not None), 3)
             for t in range(PLANNING_HORIZON_HOURS)
         ]
         _LOGGER.debug("Plan solved by %s in %.0f ms", self.plan_result.solver, self.plan_result.solve_ms)
         await self._async_run_shadow_planner(now, outdoor, specs)
         self.async_set_updated_data(self._build_state_snapshot())
+
+    def _apply_plan_result(self, raw: PlanResult, plans: dict[str, list[float | None]]) -> None:
+        """Keep the 15-minute plan for real-time control and an hourly view for the UI/history."""
+        spp = raw.slots_per_hour or 1
+        self.plan_spp = spp
+        self.plan_slots = raw
+        self.plans_15m = plans
+        view = PlanResult(
+            plans={k: aggregate_hourly(v, spp) for k, v in plans.items()},
+            setpoints={k: aggregate_hourly(v, spp, "max") for k, v in raw.setpoints.items()},
+            predicted_temps={k: aggregate_hourly(v, spp, "last") for k, v in raw.predicted_temps.items()},
+            legionella_hours=dict(raw.legionella_hours),
+            legionella_slots=dict(raw.legionella_slots),
+            solver=raw.solver, solve_ms=raw.solve_ms, unmet=dict(raw.unmet),
+            forecast_only=list(raw.forecast_only),
+            uncontrolled_72h=aggregate_hourly(raw.uncontrolled_72h, spp) or [],
+            slots_per_hour=1, ev_min_unmet=dict(raw.ev_min_unmet),
+        )
+        self.plan_result = view
+        self.plans_72h = view.plans
+
+    def slot_idx(self, now: datetime | None = None) -> int:
+        """Index of the current slot in the 15-minute plan."""
+        now = now or dt_util.now()
+        if self.plan_start is None:
+            return 0
+        return max(0, int((now - self.plan_start).total_seconds() // (3600 / max(1, self.plan_spp))))
 
     def _device_spec(self, eid: str, masks: dict[str, list[bool]]) -> dict[str, Any]:
         d = self.device_cfg(eid)
@@ -804,6 +880,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 oot_temp=self._read_float(d.get(CONF_OOT_TEMP_ENTITY)) or 10.0,
                 target_temps_72h=[comfort if m else eco for m in mask],
                 eco_temp=eco,
+                heater_kind=d.get(CONF_HEATER_KIND, HEATER_ON_OFF),
                 # used when NOT committed: the device's own setpoint decides its consumption
                 hold_setpoint=self._climate_setpoint(d.get(CONF_TARGET_ENTITY)),
             )
@@ -828,13 +905,20 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             cap_kwh = float(d.get(CONF_EV_BATTERY_KWH, 75.0))
             tgt = self.target_soc.get(eid, 80.0)
             need = max(0.0, (tgt - (soc if soc is not None else 50.0)) / 100.0 * cap_kwh)
+            min_soc = self.ev_min_soc.get(eid, 30.0)
+            min_need = max(0.0, (min_soc - (soc if soc is not None else 50.0)) / 100.0 * cap_kwh)
+            min_dl = ev_min_soc_deadline(self.ev_session_start.get(eid), self.ev_min_since.get(eid)) \
+                if self.ev_min_soc_enabled.get(eid, True) and connected else None
             spec.update(
                 connected=connected, energy_needed_kwh=need,
                 live_power_kw=self.get_device_live_power_kw(eid),
                 # a session only counts as charging when power actually flows
                 charging=connected and self.get_device_live_power_kw(eid) > 0.5,
                 min_power_kw=float(d.get(CONF_EV_MIN_CURRENT_A, 6)) * 230.0 / 1000.0,
-                finish_by=self.finish_by.get(eid),
+                # "no deadline": charge as cheaply as possible within the horizon, sooner is better
+                finish_by=self.finish_by.get(eid) if self.ev_deadline_enabled.get(eid, True) else None,
+                min_energy_kwh=min_need if min_dl else 0.0,
+                min_deadline=min_dl,
             )
         elif dtype == DeviceType.SWITCH:
             spec.update(
@@ -858,17 +942,21 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 workday_mask_72h=self._workday_mask(now),
                 monthly_kwh_used=eng.monthly_energy_kwh,
                 expected_load_kwh_72h=self.total_plan_72h,
+                spot_quarters=self._spot_quarters,
             )
             shadow_specs = self.shadow.shadow_specs(specs)
             plans = await self.hass.async_add_executor_job(
                 lambda: self.shadow_planner.optimize_72h(
-                    now, self.mode, series.total_price_72h, outdoor, self.baseload_72h,
+                    now, self.mode, series.total_price_15m or series.total_price_72h, outdoor, self.baseload_72h,
                     eng.active_tariff_kw, min(self.limiters.effective_phase_limits_a().values()),
                     shadow_specs, self.arrival_time, self.departure_time,
                     eng.hourly_cap_series_72h(now), self.priority_profile,
+                    ev_delay_penalty=self.control.ev_delay_penalty_nok,
                 )
             )
-            self.shadow_plans = plans
+            spp = self.shadow_planner.last_result.slots_per_hour or 1
+            # the shadow ledgers book whole hours -> hourly kWh
+            self.shadow_plans = {k: aggregate_hourly(v, spp) for k, v in plans.items()}
             self.shadow_plan_start = now
         except Exception:  # noqa: BLE001 – the shadow must never disturb the real controller
             _LOGGER.exception("Shadow planner failed")
@@ -989,11 +1077,12 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self._update_day_counters(dt_s)
         self._update_mode_transitions(now)
+        self._track_ev_sessions(now)
 
         dist_inputs = []
         for eid in self.device_entries:
             d = self.device_cfg(eid)
-            planned_now = float(value_at(self.plans_72h.get(eid), self.plan_idx(now)) or 0.0)
+            planned_now = float(value_at(self.plans_15m.get(eid), self.slot_idx(now)) or 0.0)
             dist_inputs.append({
                 "entry_id": eid,
                 "device_type": d[CONF_DEVICE_TYPE],
@@ -1005,6 +1094,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "committed": self.committed.get(eid, False),
                 "priority_now": self.priority_now.get(eid, False),
                 "planned_kw": planned_now,
+                "heater_kind": d.get(CONF_HEATER_KIND, HEATER_ON_OFF),
                 # EVs that the plan cannot finish in time may borrow spare capacity
                 "opportunistic_need": self.plan_result.unmet.get(eid, 0.0) > 0.1,
             })
@@ -1027,6 +1117,25 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if kw > 0.1:
                 self._day_runtime_h[eid] = self._day_runtime_h.get(eid, 0.0) + dt_s / 3600.0
 
+    def _track_ev_sessions(self, now: datetime) -> None:
+        """Plug-in time per EV: fixes the deadline for the minimum state of charge."""
+        for eid in self.device_entries:
+            d = self.device_cfg(eid)
+            if d.get(CONF_DEVICE_TYPE) != DeviceType.EV_CHARGER:
+                continue
+            connected = bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)))
+            was = self._ev_was_connected.get(eid, False)
+            if connected and not was:
+                self.ev_session_start[eid] = now
+                self.ev_min_since[eid] = None
+                self.schedule_save()
+                self.hass.async_create_task(self.async_run_planner())
+            elif not connected and was:
+                self.ev_session_start[eid] = None
+                self.ev_min_since[eid] = None
+                self.schedule_save()
+            self._ev_was_connected[eid] = connected
+
     def _update_mode_transitions(self, now: datetime) -> None:
         """Away -> Arriving (pre-heat started) -> Home (arrival time reached)."""
         if self.mode not in (GridMode.AWAY, GridMode.ARRIVING) or self.arrival_time is None:
@@ -1038,9 +1147,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.hass.async_create_task(self._async_reprice_and_replan())
             return
         if self.mode == GridMode.AWAY:
-            for eid, sp in self.plan_result.setpoints.items():
+            for eid, sp in self.plan_slots.setpoints.items():
                 d = self.device_cfg(eid) if eid in self.device_entries else {}
-                sp_now = value_at(sp, self.plan_idx(now))
+                sp_now = value_at(sp, self.slot_idx(now))
                 if d.get(CONF_DEVICE_TYPE) == DeviceType.CLIMATE_HEATING and sp_now is not None:
                     oot = self._read_float(d.get(CONF_OOT_TEMP_ENTITY)) or 10.0
                     if sp_now > oot + 0.4:
@@ -1088,15 +1197,22 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return plan_index(self.plan_start, now or dt_util.now())
 
     def _planned_setpoint(self, eid: str) -> float | None:
-        sp = value_at(self.plan_result.setpoints.get(eid), self.plan_idx())
+        sp = value_at(self.plan_slots.setpoints.get(eid), self.slot_idx())
         return float(sp) if sp is not None else None
+
+    def urgent_now(self) -> bool:
+        """True when a command must go out at once: the hour allowance is about to be
+        exceeded or a phase is beyond overload acceptance."""
+        return bool(self.warning_active or self.limiters.oa.any_limiting()
+                    or self.energy_projected_kwh > self.hour_allowance_kwh)
 
     async def _set_climate(self, now: datetime, eid: str, entity: str, temp: float, force: bool) -> None:
         st = self.hass.states.get(entity)
         cur = st.attributes.get("temperature") if st else None
-        if cur is not None and abs(float(cur) - temp) < 0.25:
-            return
-        if not force and not self._can_switch(eid, now, MIN_CLIMATE_SWITCH_SECONDS):
+        cur_f = float(cur) if cur is not None else None
+        if not should_send_command(cur_f, temp, self._last_switch_ts.get(eid), now,
+                                   self.control.temp_min_delta_c, self.control.min_interval_s,
+                                   urgent=force, lower_is_relief=True):
             return
         if await self._safe_call("climate", "set_temperature", {"entity_id": entity, "temperature": temp}):
             self._last_switch_ts[eid] = now
@@ -1175,7 +1291,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         can_toggle = self._can_switch(eid, now, MIN_EV_PAUSE_SECONDS)
         sw_state = self.hass.states.get(charge_sw) if charge_sw else None
         if target_a == 0:
-            if sw_state and sw_state.state == "on" and (can_toggle or self.warning_active):
+            if sw_state and sw_state.state == "on" and (can_toggle or self.urgent_now()):
                 if await self._safe_call("switch", "turn_off", {"entity_id": charge_sw}):
                     self._last_switch_ts[eid] = now
             self._last_ev_target_a[eid] = 0
@@ -1184,10 +1300,12 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if await self._safe_call("switch", "turn_on", {"entity_id": charge_sw}):
                 self._last_switch_ts[eid] = now
 
-        prev = self._last_ev_target_a.get(eid, -1)
+        prev = self._last_ev_target_a.get(eid)
         last_cmd = self._last_ocpp_cmd_ts.get(eid)
-        drop = target_a < prev
-        if target_a != prev and (drop or last_cmd is None or (now - last_cmd).total_seconds() >= MIN_OCPP_COMMAND_INTERVAL_S):
+        # patient: only meaningful changes, at most every few minutes; reductions go out at
+        # once only when the hour allowance or a phase is at risk (never increases)
+        if should_send_command(prev, target_a, last_cmd, now, self.control.ev_min_delta_a,
+                               self.control.min_interval_s, urgent=self.urgent_now(), lower_is_relief=True):
             # limit_amps works without a transaction id (no fragile JSON profile)
             ok = await self._safe_call("ocpp", "set_charge_rate", {"limit_amps": target_a, "conn_id": int(d.get(CONF_EV_CONN_ID, 1))})
             if ok:
@@ -1286,11 +1404,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         live = self.get_device_live_power_kw(eid)
         p1, p2 = phase_pair_conductors(d.get(CONF_PHASE_PAIR, PhasePair.L1_L2))
         amps = round(power_kw_to_it_phase_amps(live), 2)
-        last = self._last_switch_ts.get(eid)
+        # time until the next (non-urgent) command may be sent – command patience
+        last = (self._last_ocpp_cmd_ts.get(eid) if dtype == DeviceType.EV_CHARGER else None) or self._last_switch_ts.get(eid)
         hold_s = 0
         if last is not None:
-            min_s = MIN_EV_PAUSE_SECONDS if dtype == DeviceType.EV_CHARGER else (
-                MIN_RELAY_SWITCH_SECONDS if dtype == DeviceType.SWITCH else MIN_CLIMATE_SWITCH_SECONDS)
+            min_s = MIN_RELAY_SWITCH_SECONDS if dtype == DeviceType.SWITCH else self.control.min_interval_s
             hold_s = max(0, int(min_s - (dt_util.now() - last).total_seconds()))
         now = dt_util.now()
         committed = self.committed.get(eid, False)
@@ -1320,18 +1438,30 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         extra: dict[str, Any] = {}
         if dtype == DeviceType.CLIMATE_HEATING:
             extra = {"current_temp": cfg_value(CONF_ROOM_TEMP_SENSOR), "comfort_temp": cfg_value(CONF_COMFORT_TEMP_ENTITY),
-                     "eco_temp": cfg_value(CONF_ECO_TEMP_ENTITY), "comfort_during": d.get(CONF_COMFORT_DURING)}
+                     "eco_temp": cfg_value(CONF_ECO_TEMP_ENTITY), "comfort_during": d.get(CONF_COMFORT_DURING),
+                     "heater_kind": d.get(CONF_HEATER_KIND, HEATER_ON_OFF)}
         elif dtype == DeviceType.CLIMATE_HOTWATER:
             extra = {"current_temp": cfg_value(CONF_WATER_TEMP_SENSOR), "nominal_temp": cfg_value(CONF_NOMINAL_TEMP_ENTITY),
                      "min_temp": cfg_value(CONF_MIN_TEMP_ENTITY),
                      "legionella_last_ok": self.store.data.get("legionella_last_ok", {}).get(eid)}
         elif dtype == DeviceType.EV_CHARGER:
             fin = self.finish_by.get(eid)
+            dl_on = self.ev_deadline_enabled.get(eid, True)
+            min_on = self.ev_min_soc_enabled.get(eid, True)
+            min_dl = ev_min_soc_deadline(self.ev_session_start.get(eid), self.ev_min_since.get(eid)) if min_on else None
             entities.update(target_soc=self.own_entity_id("number", f"{eid}_target_soc"),
                             finish_by=self.own_entity_id("datetime", f"{eid}_finish_by"),
+                            deadline_enabled=self.own_entity_id("switch", f"{eid}_deadline_enabled"),
+                            min_soc_enabled=self.own_entity_id("switch", f"{eid}_min_soc_enabled"),
+                            min_soc=self.own_entity_id("number", f"{eid}_min_soc"),
                             soc=d.get(CONF_EV_SOC_SENSOR), connected=d.get(CONF_EV_CONNECTED_SENSOR))
             extra = {"soc": cfg_value(CONF_EV_SOC_SENSOR), "target_soc": self.target_soc.get(eid, 80.0),
-                     "finish_by": fin.isoformat() if fin else None,
+                     "finish_by": fin.isoformat() if (fin and dl_on) else None,
+                     "deadline_enabled": dl_on,
+                     "min_soc_enabled": min_on, "min_soc": self.ev_min_soc.get(eid, 30.0),
+                     "min_soc_deadline": min_dl.isoformat() if min_dl else None,
+                     "min_soc_unmet_kwh": self.plan_result.ev_min_unmet.get(eid),
+                     "session_start": self.ev_session_start.get(eid).isoformat() if self.ev_session_start.get(eid) else None,
                      "connected": bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)))}
         elif dtype == DeviceType.SWITCH:
             entities.update(runtime_hours=self.own_entity_id("number", f"{eid}_runtime_hours"))
@@ -1362,6 +1492,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if self.plan_result.predicted_temps.get(eid) else None,
             "next_action": next_action(plan, setpoints, self.plan_start, now),
             "plan_start": self.plan_start.isoformat() if self.plan_start else None,
+            "plan_15m_24h": (self.plans_15m.get(eid) or [])[self.slot_idx(now) - self.slot_idx(now) % self.plan_spp:][:24 * self.plan_spp],
+            "slots_per_hour": self.plan_spp,
+            "last_command": self._last_command_info(eid),
             "plan_72h": plan,
             "setpoint_72h": setpoints,
             "predicted_temp_72h": self.plan_result.predicted_temps.get(eid),
@@ -1375,6 +1508,52 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "governor_enabled": bool(d.get(CONF_ENABLE_PI_GOVERNOR)),
             **extra,
         }
+
+    def _aligned_15m(self, arr: list | None, start: datetime) -> list:
+        """15-minute series aligned with the plan start (288 entries)."""
+        ps = self.price_series
+        if not arr or ps is None or not ps.timestamps:
+            return []
+        off = int((start - ps.timestamps[0]).total_seconds() // 900)
+        return [arr[off + i] if 0 <= off + i < len(arr) else None for i in range(PLANNING_HORIZON_HOURS * 4)]
+
+    def _settings_entities(self) -> list[dict]:
+        """Groups of the hub's own editable entities for the panel's Settings page."""
+        hub = self.hub_entry.entry_id
+
+        def ent(domain: str, key: str) -> str | None:
+            return self.own_entity_id(domain, f"{hub}_{key}")
+
+        groups = [
+            ("Price", [("select", "price_model"), ("number", "norgespris"), ("number", "norgespris_volume"),
+                       ("number", "supplier_markup"), ("number", "support_threshold"), ("number", "support_rate"),
+                       ("number", "vat"), ("select", "tariff"), ("select", "shadow_model"), ("number", "shadow_extra_fee")]),
+            ("Grid tariff (active price list)", [("number", "grid_default"), ("number", "grid_fee")]),
+            ("Times (schedule)", [("time", "workday_wake"), ("time", "workday_leave"), ("time", "workday_back"),
+                                  ("time", "workday_sleep"), ("time", "free_day_wake"), ("time", "free_day_sleep")]),
+            ("House", [("select", "mode"), ("select", "occupancy_select"), ("select", "priority_profile"),
+                       ("datetime", "arrival_time"), ("datetime", "departure_time"),
+                       ("number", "baseload_24h"), ("number", "baseload_daytime")]),
+            ("Limits & command patience", [("number", "internal_limit"), ("number", "cmd_interval"),
+                                           ("number", "ev_min_step"), ("number", "setpoint_min_step"),
+                                           ("number", "ev_delay_penalty")]),
+        ]
+        version = self.price_engine.tariff_version()
+        out = []
+        for title, items in groups:
+            ids = [ent(dom, key) for dom, key in items]
+            if title.startswith("Grid tariff"):
+                ids += [self.own_entity_id("number", f"{hub}_grid_period_{p.id}") for p in version.periods]
+            out.append({"title": title, "entities": [i for i in ids if i]})
+        return out
+
+    def _last_command_info(self, eid: str) -> dict | None:
+        ts = self._last_ocpp_cmd_ts.get(eid) or self._last_switch_ts.get(eid)
+        if ts is None:
+            return None
+        val = self._last_ev_target_a.get(eid)
+        return {"ts": ts.isoformat(), "value": val if val is not None else self.commanded_setpoint.get(eid),
+                "unit": "A" if val is not None else "°C"}
 
     def overview_payload(self) -> dict[str, Any]:
         """Everything the Power Controller overview panel shows, in one JSON message
@@ -1493,6 +1672,10 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "runtime_required_h", "runtime_today_h", "energy_today_kwh", "entities", "forecast_only",
                 "governor", "governor_enabled", "dist_status", "dist_reason")})
             devices[-1]["plan_72h"] = self.plans_72h.get(eid)
+            devices[-1]["heater_kind"] = a.get("heater_kind")
+            devices[-1]["deadline_enabled"] = a.get("deadline_enabled")
+            devices[-1]["min_soc"] = a.get("min_soc") if a.get("min_soc_enabled") else None
+            devices[-1]["last_command"] = a.get("last_command")
 
         return {
             "now": now.isoformat(),
@@ -1526,7 +1709,14 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "hour_cap_72h": pe.hourly_cap_series_72h(start),
                 "uncontrolled_72h": self.plan_result.uncontrolled_72h,
                 "occupancy_72h": [OccupancyProfile.dominant_state(x) for x in self.occ_hour_states],
+                "slots_per_hour": self.plan_spp,
+                "price_15m": self._aligned_15m(ps.total_price_15m if ps else None, start),
+                "spot_15m": [None if v is None else round(v * (1 + pe.vat_percent / 100.0), 4)
+                             for v in self._aligned_15m(ps.raw_spot_15m if ps else None, start)],
             },
+            "control": self.control.to_dict(),
+            "urgent": self.urgent_now(),
+            "settings": self._settings_entities(),
             "kpi": {
                 "grid_power_kw": round(self.grid_power_kw, 3),
                 "limit_now_kw": self.limit_now_kw,

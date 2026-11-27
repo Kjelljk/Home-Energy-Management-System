@@ -4,8 +4,8 @@
 without the earlier conversation. Read this first, then `README.md` (features) and
 `CHANGELOG.md` (per version).
 
-**Current version:** 2.8.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
-- Pure-Python engines: unit-tested (72 tests pass, ~5 s).
+**Current version:** 2.9.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
+- Pure-Python engines: unit-tested (81 tests pass, ~5 s).
 - HA layer: syntax/undefined-name checked; options flow and the card contract/panel feed are
   exercised with HA stubs. **Never run in a real Home Assistant instance yet.**
 - Frontend JS: exercised in Chromium with a mock `hass` (all buttons/steppers/selects, panel tabs,
@@ -26,7 +26,7 @@ without the earlier conversation. Read this first, then `README.md` (features) a
 1. v1 spec by the owner → Gemini v2.1 spec + first code (MILP, untested, many critical bugs).
 2. 2.2 rewrite (LP planner, editable grid tariff, persistence, robustness) → 2.3 overload
    acceptance + English only → 2.4 shadow evaluation (Norgespris vs. spot) → 2.5 occupancy and
-   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix.
+   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts.
 
 ---
 
@@ -40,9 +40,10 @@ Four loops in `coordinator.py`:
 | 3 Real-time | every 10 s + grid sensor events | limits, overload acceptance, distribution, **all actuation** |
 | 4 Slow | every 60 s | RLS thermal learning, legionella tracking, persistence |
 
-**Plan time base (2.6 fix):** plans are solved at xx:59 with index 0 = the hour being solved
-(`plan_start`). Always use `coordinator.plan_idx(now)` / `card_model.plan_index()` to read
-"now" from a 72-h array – never `[0]`.
+**Plan time base:** plans are solved at xx:59 with index 0 = the hour being solved (`plan_start`).
+The planner runs in 15-minute slots (`plans_15m`, `plan_slots`, `slot_idx(now)` – used by the
+real-time loop); `plans_72h` / `plan_result` are the hourly view for UI, history and the shadow
+(`_apply_plan_result`). Never read "now" with `[0]`.
 
 ### Pure Python (no HA imports, unit-tested)
 | Module | Responsibility |
@@ -57,6 +58,7 @@ Four loops in `coordinator.py`:
 | `shadow.py` | Norgespris vs. spot shadow evaluation |
 | `occupancy.py` | occupancy states, home-office days, comfort masks |
 | `card_model.py` | card status mapping, next action, 24-h windows, plan index |
+| `actuation.py` | command patience (`should_send_command`), control settings, EV minimum-SoC deadline |
 
 ### Home Assistant layer
 | Module | Responsibility |
@@ -104,6 +106,10 @@ Four loops in `coordinator.py`:
     The select decides the first 2 plan hours, the Power Controller times decide later hours.
     Home and awake never lowers comfort rooms (also in real time); Away (work) after the scheduled
     return keeps the house warm; Mode Away ignores the select. Persisted; initialised from the schedule.
+12b. **15-minute LP with hourly capacity rows**; thermal/tank temperatures are sparse state variables.
+12c. **Command patience**: min step + min interval; urgent (warning / OA limiting / projected over
+    allowance) only for reductions. EV without deadline = delay penalty; minimum SoC deadline fixed
+    per plug-in session. Heater type stepless/on_off affects distribution and live-power fallback.
 12a. **Uncommitted devices are planned as a forecast** (flat, never shifted) and added to the
     baseload the optimiser sees. EV only when connected AND charging.
 12. **Committed card hides mode buttons** (targets only); uncommitted card = normal controls.

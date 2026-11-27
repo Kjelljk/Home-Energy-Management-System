@@ -119,6 +119,8 @@ def coordinator():
     c.plans_72h = {"HP": [0.0, 0.0, 1.5, 1.5] + [0.3] * 68, "EV": [0.0] * 12 + [6.0] * 6 + [0.0] * 54}
     c.plan_result.setpoints = {"HP": [18.0, 18.0, 22.0, 22.5] + [21.5] * 68}
     c.baseload_72h = [0.5] * 72
+    # hourly fixture: the real-time slot plan equals the hourly plan
+    c.plan_slots, c.plan_spp, c.plans_15m = c.plan_result, 1, c.plans_72h
     c.price_series = c.price_engine.build_72h_price_series(start, [1.0] * 72, [True] * 72, 0.0)
     c._update_occupancy(start)
     yield c
