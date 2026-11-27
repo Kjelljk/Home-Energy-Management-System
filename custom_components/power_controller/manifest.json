@@ -1,6 +1,9 @@
 {
   "domain": "power_controller",
   "name": "Power Controller",
+  "after_dependencies": [
+    "recorder"
+  ],
   "codeowners": [
     "@Kjelljk"
   ],
@@ -19,5 +22,5 @@
     "numpy>=1.24.0",
     "scipy>=1.11.0"
   ],
-  "version": "2.10.2"
+  "version": "2.11.0"
 }

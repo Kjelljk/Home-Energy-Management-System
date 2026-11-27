@@ -12,7 +12,7 @@ except ImportError:
 
 DOMAIN = "power_controller"
 
-VERSION = "2.10.2"  # keep in sync with manifest.json (used for frontend cache busting)
+VERSION = "2.11.0"  # keep in sync with manifest.json (used for frontend cache busting)
 
 
 PLATFORMS: list[str] = [
@@ -127,6 +127,10 @@ CONF_OUTDOOR_TEMP_SENSOR = "outdoor_temp_sensor"
 CONF_WEATHER_ENTITY = "weather_entity"
 CONF_EXTERNAL_LIMIT_SENSOR = "external_limit_sensor"
 CONF_SENSOR_TIMEOUT_S = "sensor_timeout_s"
+CONF_HOUR_ENERGY_SENSOR = "hour_energy_sensor"     # optional kWh utility meter that resets every hour
+CONF_NOTIFY_SERVICE = "notify_service"              # e.g. notify.mobile_app_pixel
+CONF_NOTIFY_QUIET_START = "notify_quiet_start"
+CONF_NOTIFY_QUIET_END = "notify_quiet_end"
 CONF_VOLTAGE_L12_SENSOR = "voltage_l1_l2_sensor"
 CONF_VOLTAGE_L23_SENSOR = "voltage_l2_l3_sensor"
 CONF_VOLTAGE_L31_SENSOR = "voltage_l3_l1_sensor"
@@ -203,6 +207,7 @@ SERVICE_RECALCULATE_PLAN = "recalculate_plan"
 SERVICE_RESET_SHADOW = "reset_shadow_evaluation"
 SERVICE_SET_HOME_OFFICE = "set_home_office"
 SERVICE_THERMAL_MODEL = "thermal_model"
+SERVICE_TEST_NOTIFICATION = "test_notification"
 
 OCCUPANCY_LABELS: dict[str, str] = {
     "home_awake": "Home and awake",

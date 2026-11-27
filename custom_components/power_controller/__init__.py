@@ -28,6 +28,7 @@ from .const import (
     SERVICE_RESET_SHADOW,
     SERVICE_SET_HOME_OFFICE,
     SERVICE_THERMAL_MODEL,
+    SERVICE_TEST_NOTIFICATION,
     SERVICE_SET_PRIORITIES,
 )
 
@@ -147,7 +148,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    await hass.config_entries.async_reload(entry.entry_id)
+    """Options changed. Apply them WITHOUT reloading the integration (2.11.0): devices and zones
+    are re-read and replanned, hub sensors are re-subscribed. Only a missing hub falls back to a
+    reload. (Saving the grid tariff still reloads the hub on purpose: it rebuilds the per-period
+    price entities.)"""
+    from .coordinator import get_hub_coordinator
+
+    coordinator = get_hub_coordinator(hass)
+    if coordinator is None:
+        await hass.config_entries.async_reload(entry.entry_id)
+        return
+    if entry.data.get("entry_type", ENTRY_TYPE_HUB) == ENTRY_TYPE_HUB:
+        await coordinator.async_hub_reconfigured()
+    else:
+        await coordinator.async_subentry_reconfigured(entry)
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
@@ -247,6 +261,17 @@ def _register_services(hass: HomeAssistant) -> None:
             await coordinator.async_reset_shadow()
 
     hass.services.async_register(DOMAIN, SERVICE_RESET_SHADOW, handle_reset_shadow)
+
+    async def handle_test_notification(_call: ServiceCall) -> None:
+        coordinator = get_hub_coordinator(hass)
+        if coordinator is None:
+            raise ServiceValidationError("Power Controller hub is not loaded")
+        try:
+            await coordinator.async_test_notification()
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(DOMAIN, SERVICE_TEST_NOTIFICATION, handle_test_notification)
 
     async def handle_thermal_model(call: ServiceCall) -> None:
         coordinator = get_hub_coordinator(hass)

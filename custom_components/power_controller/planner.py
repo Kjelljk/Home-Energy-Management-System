@@ -48,6 +48,7 @@ from .const import (
 
 AMPS_PER_KW = 1000.0 / NOMINAL_VOLTAGE_IT
 EV_MIN_SOC_WEIGHT_RANK = 0          # minimum state of charge is as important as Priority now
+EV_FREE_WAIT_H = 24.0               # no delay cost for the first 24 hours (EV without deadline)
 DEFAULT_EV_DELAY_PENALTY = 0.02     # NOK per kWh per hour of delay when the EV has no deadline
 
 
@@ -427,7 +428,9 @@ class EnergyPlanner:
             costs = [prices[t] * dt + 1e-5 * t * dt for t in range(H)]
             if DeviceType(dev["device_type"]) == DeviceType.EV_CHARGER and dev.get("finish_by") is None:
                 # no deadline: charge as cheaply as possible, but sooner is better
-                costs = [c + ev_delay_penalty * (t * dt) * dt for t, c in enumerate(costs)]
+                # waiting is free within the first 24 h (cheapest hours tonight/tomorrow are
+                # used as they are); only waiting beyond 24 h costs a little per kWh and hour
+                costs = [c + ev_delay_penalty * max(0.0, t * dt - EV_FREE_WAIT_H) * dt for t, c in enumerate(costs)]
             p_idx[dev["entry_id"]] = V.add(H, cost=costs, ub=p_nom)
 
         def ub_zero(eid: str, t: int) -> None:

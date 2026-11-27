@@ -90,3 +90,7 @@ thermal_model:
       description: Keep the manual values (default on for action "set").
       selector:
         boolean:
+
+test_notification:
+  name: Send Test Notification
+  description: Send a test message to the notification service configured on the Power Controller hub.

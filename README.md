@@ -22,6 +22,11 @@ comfort and staying within the capacity step and the main fuse / phase currents.
 | **2 · Plan** | hourly at :59 and on every change | When should each device use energy, given prices, comfort and limits? | power and setpoint per device in 15-minute slots for 72 h |
 | **3 · Distribution** | every 10 seconds | How much may each device use *right now* without exceeding the hour or a phase? | power per device, actuation of the devices |
 
+Energy this hour is integrated from the grid power (or your own hourly utility meter); the month
+(energy, cost, top-3, Norgespris) is rebuilt from the meter's recorder statistics after every
+restart and every hour. Optional **notifications** (one `notify.*` service) report errors and early
+warnings with action buttons.
+
 A fourth background part learns the thermal behaviour of each room, tracks the legionella cycle,
 records **plan vs. actual** and runs the **Norgespris vs. spot** shadow evaluation.
 

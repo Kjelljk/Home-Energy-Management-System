@@ -6,7 +6,7 @@
         "description": "Configure the central Power Controller sensors or select a new controllable object or thermal zone to add.",
         "data": {
           "active_power_sensor": "Grid Active Power Sensor [kW/W]",
-          "monthly_energy_sensor": "Grid Energy Import Meter [kWh]",
+          "monthly_energy_sensor": "Grid Energy Import Meter, total [kWh] (used to rebuild the month from statistics)",
           "current_l1_sensor": "Current Phase L1 [A]",
           "current_l2_sensor": "Current Phase L2 [A]",
           "current_l3_sensor": "Current Phase L3 [A]",
@@ -29,7 +29,11 @@
           "oa_hard_ratio": "Immediate limit at overload ratio [× rated]",
           "voltage_l1_l2_sensor": "Voltage L1-L2 (optional, for history)",
           "voltage_l2_l3_sensor": "Voltage L2-L3 (optional, for history)",
-          "voltage_l3_l1_sensor": "Voltage L3-L1 (optional, for history)"
+          "voltage_l3_l1_sensor": "Voltage L3-L1 (optional, for history)",
+          "hour_energy_sensor": "Energy this hour sensor [kWh] (optional – utility meter that resets every hour)",
+          "notify_service": "Notification service (optional, e.g. notify.mobile_app_pixel)",
+          "notify_quiet_start": "Quiet hours start (HH:MM – only errors are sent)",
+          "notify_quiet_end": "Quiet hours end (HH:MM)"
         }
       },
       "thermal_zone": {
@@ -129,7 +133,7 @@
         "title": "Sensors and general settings",
         "data": {
           "active_power_sensor": "Grid Active Power Sensor [kW/W]",
-          "monthly_energy_sensor": "Grid Energy Import Meter [kWh]",
+          "monthly_energy_sensor": "Grid Energy Import Meter, total [kWh] (used to rebuild the month from statistics)",
           "current_l1_sensor": "Current Phase L1 [A]",
           "current_l2_sensor": "Current Phase L2 [A]",
           "current_l3_sensor": "Current Phase L3 [A]",
@@ -152,7 +156,11 @@
           "oa_hard_ratio": "Immediate limit at overload ratio [× rated]",
           "voltage_l1_l2_sensor": "Voltage L1-L2 (optional, for history)",
           "voltage_l2_l3_sensor": "Voltage L2-L3 (optional, for history)",
-          "voltage_l3_l1_sensor": "Voltage L3-L1 (optional, for history)"
+          "voltage_l3_l1_sensor": "Voltage L3-L1 (optional, for history)",
+          "hour_energy_sensor": "Energy this hour sensor [kWh] (optional – utility meter that resets every hour)",
+          "notify_service": "Notification service (optional, e.g. notify.mobile_app_pixel)",
+          "notify_quiet_start": "Quiet hours start (HH:MM – only errors are sent)",
+          "notify_quiet_end": "Quiet hours end (HH:MM)"
         },
         "description": "{current}\n\nFields marked optional can be left empty."
       },

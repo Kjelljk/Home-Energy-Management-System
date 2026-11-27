@@ -65,15 +65,19 @@ def next_action(
     setpoints: list[float | None] | None,
     plan_start: datetime | None,
     now: datetime,
+    slot_hours: float = 1.0,
 ) -> dict[str, Any] | None:
     """The current (if running now) or next planned block of energy use.
+
+    ``slot_hours`` = length of one plan slot (0.25 for the 15-minute plan). ``kwh`` is energy.
 
     Returns ``{"start", "end", "kwh", "setpoint", "running_now"}`` with ISO timestamps
     (block end is exclusive), or None if nothing is planned in the rest of the horizon.
     """
     if not plan or plan_start is None:
         return None
-    idx = plan_index(plan_start, now)
+    sh = float(slot_hours) if slot_hours and slot_hours > 0 else 1.0
+    idx = max(0, int((now - plan_start).total_seconds() // (3600.0 * sh)))
     n = len(plan)
     i = idx
     while i < n and not ((plan[i] or 0.0) > ACTIVE_KW):
@@ -84,14 +88,14 @@ def next_action(
     kwh = 0.0
     sp_max: float | None = None
     while j < n and (plan[j] or 0.0) > ACTIVE_KW:
-        kwh += float(plan[j] or 0.0)
+        kwh += float(plan[j] or 0.0) * sh
         sp = value_at(setpoints, j)
         if sp is not None:
             sp_max = float(sp) if sp_max is None else max(sp_max, float(sp))
         j += 1
     return {
-        "start": (plan_start + timedelta(hours=i)).isoformat(),
-        "end": (plan_start + timedelta(hours=j)).isoformat(),
+        "start": (plan_start + timedelta(hours=i * sh)).isoformat(),
+        "end": (plan_start + timedelta(hours=j * sh)).isoformat(),
         "kwh": round(kwh, 2),
         "setpoint": sp_max,
         "running_now": i == idx,
