@@ -197,7 +197,7 @@ class EnergyPlanner:
         committed: list[dict] = []
         uncontrolled = [0.0] * H
         for dev in devices:
-            if dev.get("committed", False):
+            if dev.get("committed", False) and DeviceType(dev["device_type"]) != DeviceType.APPLIANCE:
                 committed.append(dev)
             else:
                 prof = self.uncontrolled_profile(dev, now, H, t_out, away, dt)
@@ -304,6 +304,14 @@ class EnergyPlanner:
         elif dtype == DeviceType.SWITCH:
             per_h = float(dev.get("runtime_hours", 0.0)) * p_nom / 24.0
             out = [0.0 if away[t] else per_h for t in range(H)]
+        elif dtype == DeviceType.APPLIANCE:
+            # waiting (delayed start) or running program: expected load per 15 min from the
+            # program register, resampled to the plan resolution
+            q = list(dev.get("fixed_load_15m") or [])
+            per = max(1, int(round(4 * dt)))          # 15-min values per plan slot
+            for t in range(H):
+                chunk = q[t * per:(t + 1) * per]
+                out[t] = sum(chunk) / per if chunk else 0.0
         return [round(v, 3) for v in out]
 
     @staticmethod

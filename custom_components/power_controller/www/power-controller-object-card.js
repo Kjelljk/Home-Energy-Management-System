@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.12.1";
+const PC_CARD_VERSION = "2.13.0";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -29,7 +29,9 @@ const PC_TYPE_ICON = {
   climate_hotwater: "mdi:water-boiler",
   ev_charger: "mdi:ev-station",
   switch: "mdi:power-socket-eu",
+  appliance: "mdi:dishwasher",
 };
+const PC_APPL_STATE = { running: "Running", delayed: "Delayed start", finished: "Finished", idle: "Off / ready" };
 
 const PC_MODE_ICON = {
   off: "mdi:power", heat: "mdi:fire", cool: "mdi:snowflake", heat_cool: "mdi:sun-snowflake-variant",
@@ -193,6 +195,12 @@ class PowerControllerObjectCard extends HTMLElement {
       const fin = a.deadline_enabled !== false && a.finish_by ? pcHHMM(new Date(a.finish_by)) : null;
       return `${a.connector_status_text ? `${a.connector_status_text} · ` : ""}${soc === null ? "–" : soc.toFixed(0)} % · target ${pcNum(this._val("target_soc", a.target_soc)) ?? "–"} %${fin ? ` by ${fin}` : " · no deadline"}${a.connected === false && !a.connector_status_text ? " · unplugged" : ""}`;
     }
+    if (t === "appliance") {
+      const p = a.program ? ` · ${a.program}` : "";
+      if (a.appliance_state_class === "delayed" && a.start_at) return `Starts ${this._when(a.start_at)}${p}`;
+      if (a.appliance_state_class === "running") return `Running${p}${a.finish_at ? ` · done ${pcHHMM(new Date(a.finish_at))}` : ""}`;
+      return `${PC_APPL_STATE[a.appliance_state_class] || "–"}${a.appliance_state ? ` (${a.appliance_state})` : ""}`;
+    }
     if (t === "switch") return `${ctrl ? fmt(ctrl) : "–"} · ${(pcNum(a.live_kw) ?? 0).toFixed(1)} kW`;
     const cur = pcNum(ctrl?.attributes?.current_temperature) ?? pcNum(a.current_temp);
     const tgt = pcNum(ctrl?.attributes?.temperature);
@@ -215,7 +223,12 @@ class PowerControllerObjectCard extends HTMLElement {
   _distHtml(a) {
     if (!this._config.show_distribution) return "";
     const key = a.committed ? (a.ui_status || "waiting") : "manual";
-    const st = PC_STATUS[key] || PC_STATUS.waiting;
+    let st = PC_STATUS[key] || PC_STATUS.waiting;
+    if (a.device_type === "appliance") {
+      const c = a.appliance_state_class;
+      st = { label: PC_APPL_STATE[c] || "Off / ready", pulse: c === "running",
+        color: c === "running" ? "var(--success-color, #43a047)" : c === "delayed" ? "var(--info-color, #039be5)" : "var(--secondary-text-color, #9b9b9b)" };
+    }
     const L = this._live(a), live = L.kw, est = !["measured", "measured_current", "off"].includes(L.src);
     const alloc = pcNum(a.allocated_kw) ?? 0, nom = Math.max(0.1, pcNum(a.nominal_kw) ?? 1);
     const kw = key === "manual"
@@ -223,7 +236,8 @@ class PowerControllerObjectCard extends HTMLElement {
       : (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw" title="Power now (${this._srcText(L.src)}) / power granted by the distribution">${live.toFixed(2)}${est ? "*" : ""} / ${alloc.toFixed(1)} kW</span>`;
     const meter = key === "manual" || alloc <= 0 ? "" :
       `<div class="meter"><i style="width:${Math.min(100, (alloc / nom) * 100)}%;background:color-mix(in srgb, ${st.color} 30%, transparent)"></i><i style="width:${Math.min(100, (live / nom) * 100)}%;background:${st.color}"></i></div>`;
-    return `<div style="--s:${st.color}"><div class="dist${st.pulse ? " pulse" : ""}" role="status"><span class="d"></span><b>${st.label}</b><span class="dt">${this._distDetail({ ...a, ui_status: key })}</span>${kw}</div>${meter}</div>`;
+    const detail = a.device_type === "appliance" ? pcEsc(a.program || "") : this._distDetail({ ...a, ui_status: key });
+    return `<div style="--s:${st.color}"><div class="dist${st.pulse ? " pulse" : ""}" role="status"><span class="d"></span><b>${st.label}</b><span class="dt">${detail}</span>${kw}</div>${meter}</div>`;
   }
 
   _nextText(a) {
@@ -318,8 +332,37 @@ class PowerControllerObjectCard extends HTMLElement {
 
   _detailsOpen() { try { return localStorage.getItem(`pc-card-details:${this._config.entity}`) === "1"; } catch (_) { return false; } }
 
+  _when(iso) {
+    const d = new Date(iso), now = new Date();
+    const day = d.toDateString() === now.toDateString() ? "" : `${d.toLocaleDateString(undefined, { weekday: "short" })} `;
+    return `${day}${pcHHMM(d)}`;
+  }
+
+  _applianceBody(a) {
+    const rows = [];
+    const cls = a.appliance_state_class;
+    rows.push(["State", `${PC_APPL_STATE[cls] || "–"}${a.appliance_state ? ` (${a.appliance_state})` : ""}`]);
+    if (a.program) rows.push(["Program", a.program]);
+    if (cls === "delayed" && a.start_at) rows.push(["Starts", this._when(a.start_at)]);
+    if (a.finish_at && cls !== "idle") rows.push(["Finished", this._when(a.finish_at)]);
+    if (pcNum(a.progress) !== null && cls === "running") rows.push(["Progress", `${pcNum(a.progress).toFixed(0)} %`]);
+    if (pcNum(a.expected_kwh) !== null && cls !== "idle") rows.push([`Expected (${a.expected_source || (a.program_learned ? "learned" : "default")})`,
+      `${pcNum(a.expected_kwh).toFixed(2)} kWh · ${pcNum(a.expected_duration_h).toFixed(1)} h`]);
+    const L = this._live(a);
+    rows.push([`Power (${this._srcText(L.src)})`, `${L.kw.toFixed(2)} kW`]);
+    rows.push(["Programs in register", String(a.programs_known ?? 0)]);
+    const prog = cls === "running" && pcNum(a.progress) !== null
+      ? `<div class="socb"><i style="width:${Math.min(100, pcNum(a.progress))}%"></i></div>` : "";
+    return `${this._stripHtml(a)}${prog}<div class="gv evi" style="margin-top:10px">${rows.map(([k, v]) => `<span>${pcEsc(k)}</span><b>${pcEsc(v)}</b>`).join("")}</div>
+      <div class="hint" style="margin-top:6px">Read only – Power Controller plans around it but never controls it.</div>`;
+  }
+
   _forecastText(a, plan) {
     const tot = plan.reduce((x, y) => x + y, 0);
+    if (a.device_type === "appliance") {
+      if (tot < 0.01) return "No program waiting or running";
+      return `Expected <b>${tot.toFixed(2)} kWh</b> next 24 h${a.start_at && a.appliance_state_class === "delayed" ? ` from <b>${this._when(a.start_at)}</b>` : ""} (fixed load, planned around)`;
+    }
     return `Not controlled · expected <b>${tot.toFixed(1)} kWh</b> next 24 h (counted in the plan, never shifted)`;
   }
 
@@ -393,6 +436,7 @@ class PowerControllerObjectCard extends HTMLElement {
   }
 
   _manualBody(a, ctrl) {
+    if (a.device_type === "appliance") return this._applianceBody(a);
     const strip = this._stripHtml(a);
     if (a.device_type === "ev_charger") return `${strip}<div class="feat"><div class="hint">The charger is not limited by Power Controller while uncommitted.</div></div>`;
     if (!ctrl) return `<div class="feat"><div class="hint">Control entity not found.</div></div>`;
@@ -438,9 +482,9 @@ class PowerControllerObjectCard extends HTMLElement {
         <div class="hdr">
           <button type="button" class="ico${active ? " act" : ""}" data-act="more" aria-label="Details for ${pcEsc(name)}"><ha-icon icon="${pcEsc(icon)}"></ha-icon></button>
           <div class="nm" data-act="more"><b>${pcEsc(name)}</b><span>${pcEsc(this._stateLine(a, ctrl))}</span></div>
-          <button type="button" class="badge" data-act="commit" aria-pressed="${committed}" aria-label="${committed ? "Committed" : "Uncommitted"}"
+          ${a.device_type === "appliance" ? `<span class="badge ro">Read only</span>` : `<button type="button" class="badge" data-act="commit" aria-pressed="${committed}" aria-label="${committed ? "Committed" : "Uncommitted"}"
             title="${committed ? "Controlled by Power Controller – tap to release" : "Not controlled – tap to let Power Controller manage it"}" ${this._ents().committed ? "" : "disabled"}>
-            <ha-icon icon="mdi:chart-timeline-variant-shimmer"></ha-icon><span class="bt">${committed ? "Committed" : "Uncommitted"}</span></button>
+            <ha-icon icon="mdi:chart-timeline-variant-shimmer"></ha-icon><span class="bt">${committed ? "Committed" : "Uncommitted"}</span></button>`}
         </div>
         ${this._distHtml(a)}
         ${committed ? this._committedBody(a) : this._manualBody(a, ctrl)}
@@ -549,7 +593,7 @@ class PowerControllerObjectCard extends HTMLElement {
       .nm span{display:block;font-size:12.5px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-variant-numeric:tabular-nums}
       .badge{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:600;border-radius:999px;padding:5px 10px 5px 8px;border:1px solid var(--divider-color);background:var(--soft);color:var(--mut);cursor:pointer;flex:none;white-space:nowrap;--mdc-icon-size:16px}
       .badge[aria-pressed=true]{color:var(--success-color, #43a047);background:color-mix(in srgb, var(--success-color, #43a047) 14%, transparent);border-color:color-mix(in srgb, var(--success-color, #43a047) 40%, transparent)}
-      .badge:disabled{cursor:default;opacity:.6}
+      .badge:disabled{cursor:default;opacity:.6}.badge.ro{cursor:default;padding:5px 10px}
       .dist{display:flex;align-items:center;gap:8px;margin-top:10px;font-size:12.5px;padding:7px 10px;border-radius:calc(var(--r) * .7);background:var(--soft);min-width:0}
       .dist .d{width:8px;height:8px;border-radius:50%;background:var(--s);flex:none;box-shadow:0 0 0 3px color-mix(in srgb, var(--s) 25%, transparent)}
       .dist.pulse .d{animation:pcp 1.6s ease-in-out infinite}

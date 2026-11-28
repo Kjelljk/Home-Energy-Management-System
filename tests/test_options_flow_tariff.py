@@ -63,9 +63,9 @@ def _install_stubs() -> None:
     core.callback = lambda f: f
     helpers = types.ModuleType("homeassistant.helpers")
     sel = types.ModuleType("homeassistant.helpers.selector")
-    for name in ("EntitySelector", "NumberSelector", "SelectSelector", "TextSelector", "DateSelector"):
+    for name in ("EntitySelector", "NumberSelector", "SelectSelector", "TextSelector", "DateSelector", "DeviceSelector"):
         setattr(sel, name, lambda *a, **k: ("selector", a, k))
-    for name in ("EntitySelectorConfig", "NumberSelectorConfig", "SelectSelectorConfig", "TextSelectorConfig"):
+    for name in ("EntitySelectorConfig", "NumberSelectorConfig", "SelectSelectorConfig", "TextSelectorConfig", "DeviceSelectorConfig"):
         setattr(sel, name, lambda *a, **k: k)
     sel.SelectOptionDict = dict
     helpers.selector = sel

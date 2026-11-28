@@ -52,7 +52,7 @@
         "data": {
           "name": "Object Name",
           "target_entity": "Entity to Control",
-          "power_sensor": "Live Active Power Sensor",
+          "power_sensor": "Live Active Power Sensor (may belong to another device, e.g. a smart plug)",
           "room_temp_sensor": "Room Temperature Sensor",
           "water_temp_sensor": "Water Temperature Sensor",
           "phase_pair": "230V IT Phase Pair",
@@ -83,7 +83,19 @@
           "ev_offered_current_sensor": "Current offered to EV [A] (optional)",
           "ev_session_energy_sensor": "Energy this session [kWh] (optional)",
           "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)",
-          "ev_current_sensor": "Measured charging current [A] (optional – used when there is no power sensor)"
+          "ev_current_sensor": "Measured charging current [A] (optional – used when there is no power sensor)",
+          "appliance_device": "Device (e.g. from Home Connect Alt) – entities are found automatically",
+          "appliance_default_kwh": "Energy per run until learned [kWh]",
+          "appliance_default_duration_h": "Duration per run until learned [h]",
+          "appl_operation_state": "Operation state sensor (override)",
+          "appl_active_program": "Active program (override)",
+          "appl_selected_program": "Selected program (override)",
+          "appl_start_in": "Start in / start time – relative, e.g. 17:42 = in 17 h 42 min (override)",
+          "appl_finish_at": "Finish at – timestamp (override)",
+          "appl_remaining": "Remaining program time (override)",
+          "appl_progress": "Program progress, percent (override)",
+          "appliance_running_states": "Extra state values meaning running (comma separated, optional)",
+          "appliance_delayed_states": "Extra state values meaning delayed start (comma separated, optional)"
         }
       }
     }
@@ -101,7 +113,7 @@
         "data": {
           "name": "Object Name",
           "target_entity": "Entity to Control",
-          "power_sensor": "Live Active Power Sensor",
+          "power_sensor": "Live Active Power Sensor (may belong to another device, e.g. a smart plug)",
           "room_temp_sensor": "Room Temperature Sensor",
           "water_temp_sensor": "Water Temperature Sensor",
           "phase_pair": "230V IT Phase Pair",
@@ -136,7 +148,19 @@
           "ev_offered_current_sensor": "Current offered to EV [A] (optional)",
           "ev_session_energy_sensor": "Energy this session [kWh] (optional)",
           "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)",
-          "ev_current_sensor": "Measured charging current [A] (optional – used when there is no power sensor)"
+          "ev_current_sensor": "Measured charging current [A] (optional – used when there is no power sensor)",
+          "appliance_device": "Device (e.g. from Home Connect Alt) – entities are found automatically",
+          "appliance_default_kwh": "Energy per run until learned [kWh]",
+          "appliance_default_duration_h": "Duration per run until learned [h]",
+          "appl_operation_state": "Operation state sensor (override)",
+          "appl_active_program": "Active program (override)",
+          "appl_selected_program": "Selected program (override)",
+          "appl_start_in": "Start in / start time – relative, e.g. 17:42 = in 17 h 42 min (override)",
+          "appl_finish_at": "Finish at – timestamp (override)",
+          "appl_remaining": "Remaining program time (override)",
+          "appl_progress": "Program progress, percent (override)",
+          "appliance_running_states": "Extra state values meaning running (comma separated, optional)",
+          "appliance_delayed_states": "Extra state values meaning delayed start (comma separated, optional)"
         }
       },
       "hub_settings": {
