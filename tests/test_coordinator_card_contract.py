@@ -360,3 +360,37 @@ def test_ev_status_sensor_and_car_limit(coordinator):
     a = coordinator.device_attributes("EV")
     assert a["connector_status_text"] == "Not connected" and a["offered_current_a"] == 16
     assert a["session_energy_kwh"] == 4.2 and a["entities"]["car_current_limit"] == "number.car_limit"
+
+
+def test_stable_power_reading_is_used_and_labelled(coordinator):
+    """2.12.1: a sensor that reports the same value (last_updated old, last_reported fresh) or that
+    only reports on change must still be MEASURED – not replaced by current x 230 V."""
+    class _St:
+        def __init__(self, s, unit="", age_s=0, reported_age_s=None):
+            self.state, self.attributes = str(s), {"unit_of_measurement": unit}
+            self.last_updated = NOW - timedelta(seconds=age_s)
+            if reported_age_s is not None:
+                self.last_reported = NOW - timedelta(seconds=reported_age_s)
+    st = {"sensor.ev_power": _St(1730, "W", age_s=900, reported_age_s=5),
+          "switch.charge": _St("on"), "sensor.status": _St("Charging"),
+          "sensor.ev_current": _St(7.6, "A"), "sensor.offered": _St(8, "A")}
+    old_get = coordinator.hass.states.get
+    coordinator.hass.states = type("S", (), {"get": staticmethod(lambda e: st.get(e) or old_get(e))})()
+    coordinator._last_ev_target_a["EV"] = 25
+    entry = coordinator.device_entries["EV"]
+    entry.data.update(power_sensor="sensor.ev_power", ev_charge_switch="switch.charge", ev_status_sensor="sensor.status",
+                      ev_current_sensor="sensor.ev_current", ev_offered_current_sensor="sensor.offered")
+    assert coordinator.device_power("EV") == (pytest.approx(1.73), "measured")       # not 25 A x 230 V = 5.75
+    st["sensor.ev_power"] = _St(1730, "W", age_s=3600)                                # only reports on change
+    assert coordinator.device_power("EV") == (pytest.approx(1.73), "measured")
+    st["sensor.ev_power"] = _St("unavailable")
+    assert coordinator.device_power("EV") == (pytest.approx(7.6 * 0.23), "measured_current")
+    st.pop("sensor.ev_current")
+    assert coordinator.device_power("EV") == (pytest.approx(8 * 0.23), "offered_current")
+    st.pop("sensor.offered")
+    assert coordinator.device_power("EV") == (pytest.approx(25 * 0.23), "commanded")
+    st["sensor.status"] = _St("SuspendedEV")
+    assert coordinator.device_power("EV") == (0.0, "off")
+    a = coordinator.device_attributes("EV")
+    assert a["power_source"] == "off" and a["entities"]["power"] == "sensor.ev_power"
+    assert a["entities"]["charging_current"] is None or "charging_current" in a["entities"]

@@ -82,7 +82,8 @@
           "ev_status_sensor": "Connector status sensor (optional – Charging, SuspendedEV, …)",
           "ev_offered_current_sensor": "Current offered to EV [A] (optional)",
           "ev_session_energy_sensor": "Energy this session [kWh] (optional)",
-          "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)"
+          "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)",
+          "ev_current_sensor": "Measured charging current [A] (optional – used when there is no power sensor)"
         }
       }
     }
@@ -134,7 +135,8 @@
           "ev_status_sensor": "Connector status sensor (optional – Charging, SuspendedEV, …)",
           "ev_offered_current_sensor": "Current offered to EV [A] (optional)",
           "ev_session_energy_sensor": "Energy this session [kWh] (optional)",
-          "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)"
+          "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)",
+          "ev_current_sensor": "Measured charging current [A] (optional – used when there is no power sensor)"
         }
       },
       "hub_settings": {

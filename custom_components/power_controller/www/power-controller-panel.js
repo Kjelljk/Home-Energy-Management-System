@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.12.0";
+const PCP_VERSION = "2.12.1";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
@@ -114,8 +114,9 @@ const pN = (v) => (v === null || v === undefined || v === "" || isNaN(Number(v))
 const pF = (v, d = 2, fb = "–") => (pN(v) === null ? fb : Number(v).toFixed(d));
 const pHH = (d) => `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 /* live power text for a device: controlled = live / granted, not controlled = measured only */
-const pLive = (x) => (x.committed ? `${pF(x.live_kw)} / ${pF(x.allocated_kw)} kW`
-  : (x.has_power_sensor === false ? "no power sensor" : `${pF(x.live_kw)} kW measured`));
+const pEst = (x) => (["measured", "measured_current", "off", undefined].includes(x.power_source) ? "" : "*");
+const pLive = (x) => (x.committed ? `${pF(x.live_kw)}${pEst(x)} / ${pF(x.allocated_kw)} kW`
+  : (x.power_source === "measured" ? `${pF(x.live_kw)} kW measured` : "no power sensor"));
 const pNok = (v) => (pN(v) === null ? "–" : Math.round(v).toLocaleString("nb-NO"));
 const pDay = (d) => d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
 const pMs = (v) => (typeof v === "number" ? (v > 1e12 ? v : v * 1000) : Date.parse(v));
@@ -288,6 +289,7 @@ class PowerControllerPanel extends HTMLElement {
     const first = !this._hass;
     this._hass = hass;
     if (first) { this._skeleton(); this._fetch(); }
+    else this._liveSoon();
     if (this._menu) this._menu.hass = hass;
     Object.values(this._cards).forEach((c) => { c.hass = hass; });
   }
@@ -507,6 +509,43 @@ class PowerControllerPanel extends HTMLElement {
     for (const k of ["live", "ph", "hist", "ov", "pr", "pl", "pva"]) this._addZoom(k);
   }
 
+  /* live values straight from HA states (the 10-s websocket feed is the fallback) */
+  _liveSoon() {
+    if (this._liveT) return;
+    this._liveT = setTimeout(() => { this._liveT = null; this._applyLive(); }, 1000);
+  }
+
+  _stateKw(id) {
+    const st = id && this._hass?.states?.[id];
+    if (!st || ["unknown", "unavailable", ""].includes(st.state)) return null;
+    const v = pN(st.state); if (v === null) return null;
+    return v * ({ W: 0.001, MW: 1000 }[String(st.attributes?.unit_of_measurement || "").trim()] || 1);
+  }
+
+  _deviceLiveKw(x) {
+    const p = this._stateKw(x.entities?.power);
+    if (p !== null) return Math.max(0, p);
+    if (x.device_type === "ev_charger" && x.power_source !== "off") {
+      for (const k of ["charging_current", "offered_current"]) {
+        const st = x.entities?.[k] && this._hass?.states?.[x.entities[k]];
+        const a = st ? pN(st.state) : null;
+        if (a !== null) return Math.max(0, a) * 0.23;
+      }
+    }
+    return pN(x.live_kw) ?? 0;
+  }
+
+  _applyLive() {
+    const d = this._data; if (!d) return;
+    const r = this.shadowRoot;
+    const g = this._stateKw(d.history_entities?.grid_power);
+    r.querySelectorAll('[data-live="grid"]').forEach((el) => { if (g !== null) el.textContent = pF(g); });
+    for (const x of d.devices) {
+      const kw = this._deviceLiveKw(x);
+      r.querySelectorAll(`[data-live="${x.entry_id}"]`).forEach((el) => { el.textContent = pF(kw); });
+    }
+  }
+
   _redrawCharts() {
     if (!this._data) return;
     if (this._tab === "ov") this._renderOverview(this._data);
@@ -531,6 +570,7 @@ class PowerControllerPanel extends HTMLElement {
       <span class="pill">Occupancy <b>${pE(occ[0])}</b></span><span class="pill">Price model <b>${pE(d.price_model)}</b></span>
       <span class="pill">Plan <b>${solved}</b> · ${pE((d.plan.solver || "").toUpperCase())} ${pF(d.plan.solve_ms, 0)} ms</span>`;
     this._redrawCharts();
+    this._applyLive();
     if (this._tab === "dv") this._renderCards(d);
     if (this._tab === "po") this._renderPrio();
     if (this._tab === "se") this._renderSettings(d);
@@ -698,7 +738,7 @@ class PowerControllerPanel extends HTMLElement {
          ${k.safe_mode_sensor_ok ? "The grid sensor is back – safe mode is held to the end of the hour." : "The grid power sensor is not updating – check the meter / HAN reader."}
          ${k.safe_mode_since ? `Since ${pHH(new Date(k.safe_mode_since))}.` : ""}</div>` : "";
     r.getElementById("kpis").innerHTML = this._kpiHtml([
-      ["Grid power", pF(k.grid_power_kw), "kW", `whole house · limit now ${pF(k.limit_now_kw)} kW`, this._pct(k.grid_power_kw, k.limit_now_kw), k.grid_power_kw > k.limit_now_kw ? "var(--error-color)" : "var(--primary-color)"],
+      ["Grid power", `<span data-live="grid">${pF(k.grid_power_kw)}</span>`, "kW", `whole house · limit now ${pF(k.limit_now_kw)} kW`, this._pct(k.grid_power_kw, k.limit_now_kw), k.grid_power_kw > k.limit_now_kw ? "var(--error-color)" : "var(--primary-color)"],
       ["This hour", pF(k.energy_this_hour_kwh), "kWh", `projected ${pF(k.energy_projected_kwh, 1)} of ${pF(k.hour_allowance_kwh)} kWh allowed · avg 60 min ${pF(k.p_avg_60m_kw)} kW · ${k.hour_energy_source === "hour_sensor" ? "hour sensor" : "integrated grid power"}`, this._pct(k.energy_projected_kwh, k.hour_allowance_kwh), k.energy_projected_kwh > k.hour_allowance_kwh ? "var(--warning-color)" : "var(--success-color)"],
       ["Capacity step", `${lower}–${pF(k.active_step_kw, 0)}`, "kW",
         (k.step_locked ? `<span class="warnt">⚠ selected ${selLower}–${pF(k.selected_step_kw, 0)} kW · in use ${lower}–${pF(k.active_step_kw, 0)} kW (locked by this month's top-3)</span> · ` : `selected step · `)
@@ -736,7 +776,7 @@ class PowerControllerPanel extends HTMLElement {
       if (!pts.length) return;
       const vals = step(pts).map((v) => Math.max(0, v ?? 0));
       sumBins = sumBins.map((a, j) => a + vals[j]);
-      stacked.push({ name: x.name, color: this._color(x.i), values: vals, live: pN(x.live_kw) });
+      stacked.push({ name: x.name, color: this._color(x.i), values: vals, live: this._deviceLiveKw(x), eid: x.entry_id });
     });
     const gid = he.grid_power, gp = (h[gid] || []).map(([t, v]) => [t, v * this._scale(gid)]).sort((a, b) => a[0] - b[0]);
     let other = null;
@@ -748,8 +788,8 @@ class PowerControllerPanel extends HTMLElement {
     }
     this._geo.live = pcTsChart(r.getElementById("svg-live"), this._w("svg-live"), { view: this._zoom["svg-live"], t0, t1: now, bins, stacked, yLabel: "kW", height: this._fsH("svg-live", 230) });
     r.getElementById("lg-live").innerHTML = stacked.length
-      ? stacked.slice().reverse().map((st) => `<span class="lg static"><span class="sw" style="background:${st.color}"></span>${pE(st.name)} <b class="num">${pF(st.live, 2)} kW</b></span>`).join("")
-        + `<span class="lg static tot">Grid <b class="num">${pF(d.kpi.grid_power_kw, 2)} kW</b></span>`
+      ? stacked.slice().reverse().map((st) => `<span class="lg static"><span class="sw" style="background:${st.color}"></span>${pE(st.name)} <b class="num"><span ${st.eid ? `data-live="${st.eid}"` : ""}>${pF(st.live, 2)}</span> kW</b></span>`).join("")
+        + `<span class="lg static tot">Grid <b class="num"><span data-live="grid">${pF(d.kpi.grid_power_kw, 2)}</span> kW</b></span>`
       : `<span class="hint">No recorder history yet for the power sensors.</span>`;
   }
 
@@ -817,7 +857,7 @@ class PowerControllerPanel extends HTMLElement {
       const nx = x.forecast_only ? `≈ ${plan.reduce((a, b) => a + b, 0).toFixed(1)} kWh/24 h` : n ? (n.running_now ? `now → ${pHH(new Date(n.end))}` : `${pHH(new Date(n.start))}–${pHH(new Date(n.end))}`) : "none";
       return `<div class="dev${this._focus === x.entry_id ? " sel" : ""}" role="button" tabindex="0" data-id="${x.entry_id}" aria-pressed="${this._focus === x.entry_id}">
         <span class="dn"><i class="sw" style="background:${this._color(i)}"></i> ${pE(x.name)}<small>${PCP_TYPE[x.device_type] || ""} · ${pE(x.phase_pair || "")}</small></span>
-        <span><span class="chip c-${st[1]}">${st[0]}</span></span><span class="x num">${x.committed ? `${pF(x.live_kw)} kW` : (x.has_power_sensor === false ? "–" : `${pF(x.live_kw)} kW`)}</span>
+        <span><span class="chip c-${st[1]}">${st[0]}</span></span><span class="x num">${x.committed || x.power_source === "measured" ? `<span data-live="${x.entry_id}">${pF(this._deviceLiveKw(x))}</span> kW` : "–"}</span>
         <span class="x num">${nx}</span><span class="x spark" title="max ${mx.toFixed(1)} kWh/h">${sp}<em>${mx.toFixed(1)}</em></span><span class="x"><span class="prio">${x.plan_priority}</span></span></div>`;
     }).join("") || `<div class="hint" style="padding:10px">No devices yet. Add them under Settings → Devices &amp; services → Power Controller.</div>`;
     r.querySelectorAll("#devs .dev").forEach((el) => {
@@ -1460,7 +1500,8 @@ class PowerControllerPanel extends HTMLElement {
     .ladder div{flex:1;border-radius:6px 6px 0 0;background:var(--divider-color);display:flex;align-items:flex-start;justify-content:center;font-size:10px;color:var(--secondary-text-color);padding-top:4px}
     .ladder div.on{background:var(--primary-color);color:var(--text-primary-color, #fff);font-weight:700}
     .ll{display:flex;gap:4px;font-size:10.5px;color:var(--secondary-text-color);margin-top:4px}.ll span{flex:1;text-align:center}
-    .dcs{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(340px,100%),1fr));gap:14px;align-items:start}
+    .dcs{columns:340px auto;column-gap:14px}
+    .dcs>*{break-inside:avoid;display:block;margin:0 0 14px}
     .pl{list-style:none;margin:0;padding:0}
     .pr{display:flex;align-items:center;gap:10px;padding:9px 8px;border-top:1px solid var(--divider-color);border-radius:8px}
     .pr.drag{opacity:.4}.pr.moved .prio{background:var(--primary-color);color:var(--text-primary-color, #fff)}

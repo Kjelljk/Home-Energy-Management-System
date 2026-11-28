@@ -1,5 +1,38 @@
 # Changelog
 
+## 2.12.1
+
+### Live power was replaced by an estimate (bug fix)
+- **Cause:** a reading counted as stale when HA's `last_updated` was older than 2 minutes. HA only
+  moves `last_updated` when the VALUE changes, so a stable reading (e.g. the EV at a steady
+  1.73 kW) – or a sensor that only reports on change – was thrown away and silently replaced by
+  the commanded current × 230 V (25 A → 5.75 kW). The card still said "Power".
+- Freshness now uses `last_reported` (HA 2024.3+), with `last_updated` as fallback. This also
+  protects the grid meter against false safe mode.
+- Device power sensors have no staleness gate any more: a value is valid until the sensor is
+  unavailable. Only the grid meter keeps the gate (needed for safe mode).
+- New `power_source` per device: measured · measured current · offered current · commanded ·
+  assumed · off. The card and panel label estimates (`*` and a tooltip) instead of pretending.
+- EV without a power sensor: estimate from the new optional *Measured charging current* sensor,
+  then the offered current, and only then the current Power Controller sent.
+
+### Live values update when they change in Home Assistant
+- The object card reads power, charging current, offered current, connector status and session
+  energy directly from HA states (re-renders on change). The 10-s plan-sensor values are only the
+  fallback.
+- Panel: grid power KPI, the power-per-device legend and the device table's *Now* column are
+  updated from HA states within a second of a change.
+
+### Layout
+- EV card: actual power, plan strip and SoC bar always visible; everything else in a collapsible
+  *Details* section with a one-line summary ("Charging · 7.6 A · 1.73 kW · 0.31 kWh"). Open/closed
+  is remembered per card in the browser. About 380 px tall collapsed (was ~660 px).
+- Devices page: masonry columns – a tall card no longer leaves empty space next to it.
+
+### Tests
+- 1 new test (117 total): stable/on-change power readings stay measured; estimate chain measured
+  current → offered current → commanded; off when the connector status says so.
+
 ## 2.12.0
 
 ### Capacity step selector stays fixed
