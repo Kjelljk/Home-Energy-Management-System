@@ -318,8 +318,21 @@ def test_safe_mode_is_held_to_end_of_hour_and_tariff_selector_fixed(coordinator)
     cmod.dt_util.now = lambda: clock["t"]
     cmod.dt_util.utcnow = lambda: clock["t"]
     try:
-        asyncio.run(coordinator._async_update_data())                 # no grid sensor -> safe mode
+        # start-up grace: no reading yet right after a restart -> wait, no safe mode, no commands
+        coordinator._started_at = clock["t"]
+        asyncio.run(coordinator._async_update_data())
+        assert coordinator.startup_wait and not coordinator.safe_mode_active
+        # running for a while, reading lost: safe budget at once, latched after 2 minutes
+        coordinator._started_at = NOW - timedelta(hours=2)
+        coordinator._grid_seen_ok = True
+        coordinator._grid_missing_since = None
+        clock["t"] = NOW.replace(minute=20, second=10)
+        asyncio.run(coordinator._async_update_data())
         assert coordinator.safe_mode_active and coordinator.limit_now_kw <= 3.0
+        assert coordinator._safe_mode_hour is None                    # short gap: not latched yet
+        clock["t"] = NOW.replace(minute=23)
+        asyncio.run(coordinator._async_update_data())
+        assert coordinator._safe_mode_hour is not None                # real outage: latched
         clock["t"] = NOW.replace(minute=30)
         st["sensor.grid"] = _St(2.0); st["sensor.grid"].last_updated = clock["t"]
         asyncio.run(coordinator._async_update_data())                 # sensor back -> still safe mode
@@ -394,3 +407,46 @@ def test_stable_power_reading_is_used_and_labelled(coordinator):
     a = coordinator.device_attributes("EV")
     assert a["power_source"] == "off" and a["entities"]["power"] == "sensor.ev_power"
     assert a["entities"]["charging_current"] is None or "charging_current" in a["entities"]
+
+
+def test_appliance_device_end_to_end(coordinator):
+    """Home Connect dishwasher: delayed start read from 'Start time', register learned from a
+    power sensor of another device, expected load in the plan spec, read-only attributes."""
+    from custom_components.power_controller.const import DeviceType
+
+    class _St:
+        def __init__(self, s, unit=""):
+            self.state, self.attributes, self.last_updated = str(s), {"unit_of_measurement": unit}, NOW
+    st = {"sensor.dw_state": _St("Delayed Start"), "sensor.dw_start": _St("17:42"), "sensor.dw_prog": _St("Super 60°C"),
+          "sensor.plug_power": _St(0, "W")}
+    old_get = coordinator.hass.states.get
+    coordinator.hass.states = type("S", (), {"get": staticmethod(lambda e: st.get(e) or old_get(e))})()
+    coordinator.hass.async_create_task = lambda c: c.close()
+    coordinator.schedule_save = lambda: None
+    coordinator.register_subentry(_Entry("DW", "Siemens Dishwasher", {
+        "entry_type": "device", "device_type": DeviceType.APPLIANCE, "phase_pair": "L1-L2", "nominal_power_kw": 2.0,
+        "power_sensor": "sensor.plug_power", "appliance_default_kwh": 1.1, "appliance_default_duration_h": 3.0,
+        "appl_operation_state": "sensor.dw_state", "appl_start_in": "sensor.dw_start",
+        "appl_selected_program": "sensor.dw_prog", "committed": True}))
+    assert coordinator.committed["DW"] is False
+    s = coordinator.appliance_status("DW", NOW)
+    assert s["state_class"] == "delayed" and s["program"] == "Super 60°C"
+    assert s["start_at"] == NOW + timedelta(hours=17.7)
+    spec = coordinator._device_spec("DW", {})
+    assert spec["committed"] is False and sum(spec["fixed_load_15m"]) * 0.25 == pytest.approx(1.1, abs=0.01)
+    a = coordinator.device_attributes("DW")
+    assert a["appliance_state_class"] == "delayed" and a["entities"]["committed"] is None
+    assert a["start_at"].startswith((NOW + timedelta(hours=17.7)).isoformat()[:16])
+    # run it: 1.5 kW for 1 h measured on the plug, then finished -> register
+    st["sensor.dw_state"] = _St("Run")
+    st["sensor.dw_start"] = _St("0:00")
+    st["sensor.plug_power"] = _St(1500, "W")
+    for i in range(361):
+        coordinator._update_appliances(NOW + timedelta(seconds=10 * i))
+    st["sensor.dw_state"] = _St("Finished")
+    coordinator._update_appliances(NOW + timedelta(hours=1, seconds=20))
+    reg = coordinator.appliances["DW"].stats("Super 60°C")
+    assert reg.runs == 1 and reg.kwh == pytest.approx(1.5, abs=0.02) and reg.duration_h == pytest.approx(1.0, abs=0.01)
+    p = coordinator.overview_payload()
+    row = next(x for x in p["appliances"] if x["device_id"] == "DW")
+    assert row["programs"][0]["program"] == "Super 60°C" and row["programs"][0]["runs"] == 1

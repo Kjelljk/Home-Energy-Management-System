@@ -129,3 +129,39 @@ hotwater_model:
       name: Freeze learning
       selector:
         boolean:
+
+appliance_program:
+  name: Appliance Program Register
+  description: Set the energy and duration of an appliance program manually, delete one program, or reset the whole register.
+  fields:
+    device_id:
+      name: Device ID
+      required: true
+      description: The Power Controller config entry id of the appliance.
+      selector:
+        text:
+    action:
+      name: Action
+      required: true
+      selector:
+        select:
+          options: ["set", "delete", "reset"]
+    program:
+      name: Program
+      description: Program name as reported by the appliance (e.g. "Eco 50°C").
+      selector:
+        text:
+    kwh:
+      name: Energy per run (kWh)
+      selector:
+        number:
+          min: 0
+          max: 50
+          step: 0.05
+    duration_h:
+      name: Duration (h)
+      selector:
+        number:
+          min: 0.05
+          max: 24
+          step: 0.05

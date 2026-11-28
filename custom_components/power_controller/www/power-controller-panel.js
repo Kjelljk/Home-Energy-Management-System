@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.12.1";
+const PCP_VERSION = "2.13.0";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
@@ -23,7 +23,7 @@ const PCP_OCC = {
   home_awake: ["Home & awake", "var(--success-color, #43a047)"], home_office: ["Home office", "#8b5cf6"],
   away_work: ["Away (work)", "var(--divider-color, #ccc)"], sleep: ["Sleeping", "#3b4a8a"], out_of_town: ["Out of town", "#888"],
 };
-const PCP_TYPE = { climate_heating: "Heating", climate_hotwater: "Hot water", ev_charger: "EV charger", switch: "Switch" };
+const PCP_TYPE = { climate_heating: "Heating", climate_hotwater: "Hot water", ev_charger: "EV charger", switch: "Switch", appliance: "Appliance" };
 const PCP_TABS = [["ov", "Overview"], ["pr", "Price"], ["pl", "Plan"], ["di", "Distribution"], ["dv", "Devices"], ["po", "Priorities"], ["se", "Settings"]];
 /* ---- help texts for the Settings page (key = entity key) ---- */
 const PCP_HELP = {
@@ -456,6 +456,8 @@ class PowerControllerPanel extends HTMLElement {
           <div class="setg tzg" id="thz"></div>
           <div class="hd" style="margin:18px 0 10px"><div><h2>Hot-water models</h2><div class="hint">Learned per water heater from the tank temperature and the element's power: standby loss and when hot water is used. The planner uses these instead of fixed defaults.</div></div></div>
           <div class="setg tzg" id="hwm"></div>
+          <div class="hd" style="margin:18px 0 10px"><div><h2>Appliance program registers</h2><div class="hint">Energy and duration per program, learned from the power sensor each time a program finishes. Used to plan around delayed starts and running programs.</div></div></div>
+          <div class="setg tzg" id="apm"></div>
           <div class="hd" style="margin:18px 0 10px"><div><h2>Notifications</h2><div class="hint">Errors and early warnings to one notify service (set under Configure → Sensors and general settings). Quiet hours: only errors. The same message at most once per hour.</div></div>
             <button type="button" class="btn" id="ntest">Send test</button></div>
           <div class="card" id="nlog"></div>
@@ -565,7 +567,7 @@ class PowerControllerPanel extends HTMLElement {
     r.getElementById("sub").textContent = `Home energy management · ${now.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long" })} · ${pHH(now)}`;
     const occ = PCP_OCC[d.occupancy] || [d.occupancy, ""];
     const solved = d.plan.solved ? pHH(new Date(d.plan.solved)) : "–";
-    r.getElementById("pills").innerHTML = (d.kpi.safe_mode ? `<span class="pill bad"><span class="dot" style="background:var(--error-color)"></span><b>SAFE MODE</b></span>` : "")
+    r.getElementById("pills").innerHTML = (d.kpi.startup_wait ? `<span class="pill warn">Waiting for grid meter</span>` : "") + (d.kpi.safe_mode ? `<span class="pill bad"><span class="dot" style="background:var(--error-color)"></span><b>SAFE MODE</b></span>` : "")
       + (d.kpi.step_locked ? `<span class="pill warn">Step locked <b>${pF(d.kpi.active_step_kw, 0)} kW</b></span>` : "") + `<span class="pill"><span class="dot" style="background:${d.kpi.warning ? "var(--warning-color)" : "var(--success-color)"}"></span>Mode <b>${pE(d.mode)}</b></span>
       <span class="pill">Occupancy <b>${pE(occ[0])}</b></span><span class="pill">Price model <b>${pE(d.price_model)}</b></span>
       <span class="pill">Plan <b>${solved}</b> · ${pE((d.plan.solver || "").toUpperCase())} ${pF(d.plan.solve_ms, 0)} ms</span>`;
@@ -733,8 +735,10 @@ class PowerControllerPanel extends HTMLElement {
     const ssi = steps.findIndex((s) => s.upper_kw > 0 && Math.abs(s.upper_kw - k.selected_step_kw) < 1e-6);
     const selLower = ssi > 0 ? steps[ssi - 1].upper_kw : 0;
     const pn = k.price_now || {};
-    r.getElementById("safe").innerHTML = k.safe_mode
-      ? `<div class="safe"><b>SAFE MODE</b> · budget limited to the safe value until ${pHH(new Date(new Date(d.now).setMinutes(60, 0, 0)))}.
+    r.getElementById("safe").innerHTML = k.startup_wait
+      ? `<div class="safe" style="border-color:var(--warning-color);background:color-mix(in srgb, var(--warning-color) 10%, transparent)"><b style="color:var(--warning-color)">STARTING</b> · waiting for the first grid reading after start-up (max 3 min). Nothing is switched meanwhile.</div>`
+      : k.safe_mode
+      ? `<div class="safe"><b>SAFE MODE</b> · budget limited to the safe value${k.safe_mode_latched ? ` until ${pHH(new Date(new Date(d.now).setMinutes(60, 0, 0)))}` : " while the grid reading is missing"}.
          ${k.safe_mode_sensor_ok ? "The grid sensor is back – safe mode is held to the end of the hour." : "The grid power sensor is not updating – check the meter / HAN reader."}
          ${k.safe_mode_since ? `Since ${pHH(new Date(k.safe_mode_since))}.` : ""}</div>` : "";
     r.getElementById("kpis").innerHTML = this._kpiHtml([
@@ -961,6 +965,8 @@ class PowerControllerPanel extends HTMLElement {
       const nb = this.shadowRoot.getElementById("ntest");
       if (nb && !nb._b) { nb._b = true; nb.addEventListener("click", () => { this._call("power_controller", "test_notification", {}); this._say("Test notification sent"); }); }
     }
+    const ap = this.shadowRoot.getElementById("apm");
+    if (ap && !(typing && ap.contains(active))) this._renderAppliances(d, ap);
     const hw = this.shadowRoot.getElementById("hwm");
     if (hw && !(typing && hw.contains(active))) this._renderHotwater(d, hw);
     const tz = this.shadowRoot.getElementById("thz");
@@ -1015,6 +1021,54 @@ class PowerControllerPanel extends HTMLElement {
         root.querySelectorAll(".hq.open").forEach((x) => x.classList.remove("open")); if (!o) q.classList.add("open"); };
       q.addEventListener("click", toggle);
       q.addEventListener("keydown", (ev) => { if (ev.key === "Enter" || ev.key === " ") toggle(ev); if (ev.key === "Escape") q.classList.remove("open"); });
+    });
+  }
+
+  // ------------------------------------------------------------------ APPLIANCES
+  _renderAppliances(d, box) {
+    const list = d.appliances || [];
+    if (!list.length) { box.innerHTML = `<div class="card"><div class="hint">No household appliances configured (Add → Household appliance).</div></div>`; return; }
+    const SC = { running: ["Running", "ok"], delayed: ["Delayed start", "info"], finished: ["Finished", "mut"], idle: ["Off / ready", "mut"] };
+    box.innerHTML = list.map((a) => {
+      const st = SC[a.state_class] || SC.idle;
+      const cur = (a.programs || []).find((p) => p.program === a.program);
+      const fk = cur ? cur.kwh : a.default_kwh, fd = cur ? cur.duration_h : a.default_duration_h;
+      const roles = Object.entries(a.roles || {}).map(([k, v]) => `<span>${pE(k.replace(/_/g, " "))}</span><b>${pE(v)}</b>`).join("");
+      const rows = (a.programs || []).map((p) => `<tr><td>${pE(p.program)}${p.manual ? ' <small class="hint">manual</small>' : ""}</td><td class="num">${p.runs}</td>
+        <td class="num">${pF(p.kwh, 2)}</td><td class="num">${pF(p.duration_h, 2)}</td><td class="num">${p.last_kwh === null || p.last_kwh === undefined ? "–" : pF(p.last_kwh, 2)}</td>
+        <td><button type="button" class="ab" data-del="${pE(p.program)}" aria-label="Delete ${pE(p.program)}">✕</button></td></tr>`).join("");
+      return `<div class="card ap" data-dev="${pE(a.device_id)}">
+        <div class="hd"><div><h2>${pE(a.name)}</h2><div class="hint">${a.program ? pE(a.program) + " · " : ""}${pE(a.state || "–")}${a.running ? ` · this run so far ${pF(a.run_kwh_so_far, 2)} kWh` : ""}</div></div><span class="chip c-${st[1]}">${st[0]}</span></div>
+        ${a.has_power_sensor ? "" : `<div class="hint warnt" style="margin-bottom:8px">No power sensor – the register cannot learn. Choose one under Configure (it may belong to another device, e.g. a smart plug).</div>`}
+        <table class="aptab"><thead><tr><th>Program</th><th class="num">Runs</th><th class="num">kWh</th><th class="num">Hours</th><th class="num">Last kWh</th><th></th></tr></thead>
+        <tbody>${rows || `<tr><td colspan="6" class="hint">No program learned yet. Until then ${pF(a.default_kwh, 2)} kWh over ${pF(a.default_duration_h, 1)} h is assumed.</td></tr>`}</tbody></table>
+        <details class="tzm"><summary>Add / adjust a program manually</summary>
+          <div class="tzr">
+            <label class="sf"><span>Program (exact name)</span><span class="sc2"><input type="text" data-f="prog" value="${pE(a.program || "")}" style="width:170px"></span></label>
+            <label class="sf"><span>Energy per run</span><span class="sc2"><input type="number" step="0.05" min="0" max="50" data-f="kwh" value="${pF(fk, 2)}"><span class="u">kWh</span></span></label>
+            <label class="sf"><span>Duration</span><span class="sc2"><input type="number" step="0.05" min="0.05" max="24" data-f="dur" value="${pF(fd, 2)}"><span class="u">h</span></span></label>
+          </div>
+          <div class="tzb"><button type="button" class="btn pri" data-a="set">Save program</button><button type="button" class="btn" data-a="reset">Reset register</button></div>
+        </details>
+        <details class="tzm"><summary>Entities used</summary><div class="kv">${roles || '<span class="hint">none found – choose the device or the entities under Configure</span>'}</div></details>
+      </div>`;
+    }).join("");
+    box.querySelectorAll(".ap").forEach((card) => {
+      const dev = card.dataset.dev;
+      card.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => {
+        if (!confirm(`Delete ${b.dataset.del} from the register?`)) return;
+        this._call("power_controller", "appliance_program", { device_id: dev, action: "delete", program: b.dataset.del });
+      }));
+      card.querySelectorAll("[data-a]").forEach((b) => b.addEventListener("click", () => {
+        if (b.dataset.a === "reset") {
+          if (!confirm("Reset the whole program register?")) return;
+          this._call("power_controller", "appliance_program", { device_id: dev, action: "reset" }); return;
+        }
+        const prog = card.querySelector("[data-f=prog]").value.trim(), kwh = Number(card.querySelector("[data-f=kwh]").value), dur = Number(card.querySelector("[data-f=dur]").value);
+        if (!prog || !(kwh >= 0) || !(dur > 0)) { this._say("Enter program, kWh and duration"); return; }
+        this._call("power_controller", "appliance_program", { device_id: dev, action: "set", program: prog, kwh, duration_h: dur });
+        this._say(`Program ${prog} saved`);
+      }));
     });
   }
 
@@ -1571,6 +1625,8 @@ class PowerControllerPanel extends HTMLElement {
     .sf input,.sf select{font:inherit;font-size:13px;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:8px;padding:5px 8px;max-width:min(190px,100%);min-width:0}
     .sf input[type=number]{width:96px}
     a.btn{text-decoration:none;display:inline-block}
+    .aptab{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:6px}.aptab th{text-align:left;font-size:11px;text-transform:uppercase;color:var(--secondary-text-color);font-weight:600;padding:4px 6px}
+    .aptab td{padding:5px 6px;border-top:1px solid var(--divider-color)}.aptab .num{text-align:right;font-variant-numeric:tabular-nums}.aptab .ab{width:24px;height:24px;font-size:11px}
     svg.hwp{display:block;width:100%;height:auto;margin-top:4px}
     svg.zoomable{touch-action:pan-y;cursor:grab}svg.zoomable:active{cursor:grabbing}
     .zrs{position:absolute;bottom:10px;right:12px;z-index:3;font:inherit;font-size:11.5px;border-radius:8px;padding:4px 10px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color);cursor:pointer}

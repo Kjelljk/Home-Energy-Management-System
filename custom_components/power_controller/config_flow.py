@@ -34,6 +34,12 @@ from .const import (
     CONF_EV_SESSION_ENERGY_SENSOR,
     CONF_EV_CAR_LIMIT_ENTITY,
     CONF_EV_CURRENT_SENSOR,
+    CONF_APPLIANCE_DEVICE,
+    CONF_APPL_DEFAULT_KWH,
+    CONF_APPL_DEFAULT_H,
+    CONF_APPL_RUNNING_STATES,
+    CONF_APPL_DELAYED_STATES,
+    APPLIANCE_ROLE_CONF,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
     CONF_HOUR_ENERGY_SENSOR,
@@ -377,6 +383,26 @@ def _device_schema(
             }
         )
 
+    if device_type == DeviceType.APPLIANCE:
+        roles = {}
+        for role, key in APPLIANCE_ROLE_CONF.items():
+            domains = ["sensor", "select"] if role in ("active_program", "selected_program") else ["sensor"]
+            roles[_opt(key, d)] = selector.EntitySelector(selector.EntitySelectorConfig(domain=domains))
+        return vol.Schema(
+            {
+                vol.Required("name", default=d.get("name", "Dishwasher")): str,
+                _opt(CONF_APPLIANCE_DEVICE, d): selector.DeviceSelector(selector.DeviceSelectorConfig()),
+                _opt(CONF_POWER_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                vol.Required(CONF_PHASE_PAIR, default=d.get(CONF_PHASE_PAIR, PhasePair.L1_L2)): phase_sel,
+                vol.Required(CONF_NOMINAL_POWER_KW, default=_dv(d, CONF_NOMINAL_POWER_KW, 2.0, float)): vol.Coerce(float),
+                vol.Required(CONF_APPL_DEFAULT_KWH, default=_dv(d, CONF_APPL_DEFAULT_KWH, 1.0, float)): vol.Coerce(float),
+                vol.Required(CONF_APPL_DEFAULT_H, default=_dv(d, CONF_APPL_DEFAULT_H, 2.0, float)): vol.Coerce(float),
+                **roles,
+                vol.Optional(CONF_APPL_RUNNING_STATES, default=d.get(CONF_APPL_RUNNING_STATES) or ""): str,
+                vol.Optional(CONF_APPL_DELAYED_STATES, default=d.get(CONF_APPL_DELAYED_STATES) or ""): str,
+            }
+        )
+
     # DeviceType.SWITCH
     return vol.Schema(
         {
@@ -441,6 +467,7 @@ class PowerControllerConfigFlow(ConfigFlow, domain=DOMAIN):
             {"value": DeviceType.CLIMATE_HEATING.value, "label": "Climate (Heating)"},
             {"value": DeviceType.CLIMATE_HOTWATER.value, "label": "Climate (Hotwater)"},
             {"value": DeviceType.SWITCH.value, "label": "Switch"},
+            {"value": DeviceType.APPLIANCE.value, "label": "Household appliance (read only – dishwasher, oven, washer)"},
             {"value": ENTRY_TYPE_ZONE, "label": "Thermal Zone (Thermodynamic Model)"},
         ]
         schema = vol.Schema(

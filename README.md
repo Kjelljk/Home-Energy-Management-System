@@ -27,6 +27,9 @@ Energy this hour is integrated from the grid power (or your own hourly utility m
 restart and every hour. Optional **notifications** (one `notify.*` service) report errors and early
 warnings with action buttons.
 
+**Household appliances** (dishwasher, oven, washer) are read only: a delayed start or a running
+program is added to the plan as a fixed load, using an energy register learned per program.
+
 A fourth background part learns the thermal behaviour of each room, tracks the legionella cycle,
 records **plan vs. actual** and runs the **Norgespris vs. spot** shadow evaluation.
 

@@ -12,7 +12,7 @@ except ImportError:
 
 DOMAIN = "power_controller"
 
-VERSION = "2.12.1"  # keep in sync with manifest.json (used for frontend cache busting)
+VERSION = "2.13.0"  # keep in sync with manifest.json (used for frontend cache busting)
 
 
 PLATFORMS: list[str] = [
@@ -35,6 +35,8 @@ NOMINAL_VOLTAGE_IT = 230.0
 PLANNING_HORIZON_HOURS = 72
 TARIFF_BUFFER_KWH = 0.15
 SAFE_MODE_MAX_KW = 3.0
+STARTUP_GRACE_S = 180              # no safe mode while waiting for the first grid reading after start-up
+SAFE_MODE_LATCH_S = 120            # a real outage (grid reading missing this long) latches safe mode to the end of the hour
 
 # Anti-cycling & OCPP guardrails
 MIN_CLIMATE_SWITCH_SECONDS = 300   # 5 minutes
@@ -91,6 +93,7 @@ class DeviceType(StrEnum):
     CLIMATE_HEATING = "climate_heating"
     CLIMATE_HOTWATER = "climate_hotwater"
     SWITCH = "switch"
+    APPLIANCE = "appliance"          # read-only household appliance (dishwasher, oven, washer …)
 
 
 class PhasePair(StrEnum):
@@ -228,6 +231,23 @@ SERVICE_SET_HOME_OFFICE = "set_home_office"
 SERVICE_THERMAL_MODEL = "thermal_model"
 SERVICE_TEST_NOTIFICATION = "test_notification"
 SERVICE_HOTWATER_MODEL = "hotwater_model"
+SERVICE_APPLIANCE_PROGRAM = "appliance_program"
+
+# Config keys - household appliance (read only)
+CONF_APPLIANCE_DEVICE = "appliance_device"          # HA device (e.g. Home Connect Alt) – roles auto-detected
+CONF_APPL_DEFAULT_KWH = "appliance_default_kwh"
+CONF_APPL_DEFAULT_H = "appliance_default_duration_h"
+CONF_APPL_RUNNING_STATES = "appliance_running_states"   # extra state values meaning "running" (comma list)
+CONF_APPL_DELAYED_STATES = "appliance_delayed_states"   # extra state values meaning "delayed start"
+APPLIANCE_ROLE_CONF = {   # role -> config key (explicit choice overrides auto-detection)
+    "operation_state": "appl_operation_state",
+    "active_program": "appl_active_program",
+    "selected_program": "appl_selected_program",
+    "start_in": "appl_start_in",
+    "finish_at": "appl_finish_at",
+    "remaining": "appl_remaining",
+    "progress": "appl_progress",
+}
 
 OCCUPANCY_LABELS: dict[str, str] = {
     "home_awake": "Home and awake",

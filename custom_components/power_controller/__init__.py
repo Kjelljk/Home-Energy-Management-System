@@ -30,6 +30,7 @@ from .const import (
     SERVICE_THERMAL_MODEL,
     SERVICE_TEST_NOTIFICATION,
     SERVICE_HOTWATER_MODEL,
+    SERVICE_APPLIANCE_PROGRAM,
     SERVICE_SET_PRIORITIES,
 )
 
@@ -262,6 +263,28 @@ def _register_services(hass: HomeAssistant) -> None:
             await coordinator.async_reset_shadow()
 
     hass.services.async_register(DOMAIN, SERVICE_RESET_SHADOW, handle_reset_shadow)
+
+    async def handle_appliance_program(call: ServiceCall) -> None:
+        coordinator = get_hub_coordinator(hass)
+        if coordinator is None:
+            raise ServiceValidationError("Power Controller hub is not loaded")
+        try:
+            await coordinator.async_appliance_program(call.data["device_id"], call.data["action"],
+                                                      call.data.get("program"), call.data.get("kwh"),
+                                                      call.data.get("duration_h"))
+        except ValueError as err:
+            raise ServiceValidationError(str(err)) from err
+
+    hass.services.async_register(
+        DOMAIN, SERVICE_APPLIANCE_PROGRAM, handle_appliance_program,
+        schema=vol.Schema({
+            vol.Required("device_id"): cv.string,
+            vol.Required("action"): vol.In(["set", "delete", "reset"]),
+            vol.Optional("program"): cv.string,
+            vol.Optional("kwh"): vol.All(vol.Coerce(float), vol.Range(min=0, max=50)),
+            vol.Optional("duration_h"): vol.All(vol.Coerce(float), vol.Range(min=0.05, max=24)),
+        }),
+    )
 
     async def handle_hotwater_model(call: ServiceCall) -> None:
         coordinator = get_hub_coordinator(hass)

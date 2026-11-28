@@ -31,6 +31,8 @@ async def async_setup_entry(
         return
     if entry.data.get("entry_type") != ENTRY_TYPE_DEVICE:
         return
+    if entry.data.get(CONF_DEVICE_TYPE) == DeviceType.APPLIANCE.value:
+        return   # read only: Power Controller never controls an appliance
     entities: list[SwitchEntity] = [
         DeviceCommittedSwitch(coordinator, entry),
         DevicePriorityNowSwitch(coordinator, entry),

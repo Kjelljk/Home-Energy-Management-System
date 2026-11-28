@@ -50,6 +50,12 @@ from .const import (
     CONF_EV_SESSION_ENERGY_SENSOR,
     CONF_EV_CAR_LIMIT_ENTITY,
     CONF_EV_CURRENT_SENSOR,
+    CONF_APPLIANCE_DEVICE,
+    CONF_APPL_DEFAULT_KWH,
+    CONF_APPL_DEFAULT_H,
+    CONF_APPL_RUNNING_STATES,
+    CONF_APPL_DELAYED_STATES,
+    APPLIANCE_ROLE_CONF,
     EV_STATUS_TEXT,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
@@ -101,6 +107,8 @@ from .const import (
     PriceModel,
     PriorityProfile,
     SENSOR_STALE_DEFAULT_S,
+    SAFE_MODE_LATCH_S,
+    STARTUP_GRACE_S,
     phase_pair_conductors,
     power_kw_to_it_phase_amps,
 )
@@ -122,6 +130,7 @@ from .energy_meter import ClosedHour, HourEnergyTracker, max_hour_kwh_for_fuse, 
 from .notifier import ACTION_IGNORE, ACTION_PRIORITY_NOW, NotifySettings, Notifier, parse_hhmm
 from .occupancy import OCC_SELECT_OPTIONS, OccupancyProfile, apply_selector, effective_state
 from .hotwater_model import HotWaterModel
+from .appliance_model import ApplianceModel, classify as appl_classify, detect_roles, parse_duration_h, parse_timestamp
 from .shadow import ShadowEvaluator
 from .storage import PowerControllerStore
 from .thermodynamics import ThermalZoneModel, seed_thermal_parameters
@@ -159,6 +168,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
         self.zones: dict[str, ThermalZoneModel] = {}
         self.tanks: dict[str, HotWaterModel] = {}      # learned hot-water tank models per device
+        self.appliances: dict[str, ApplianceModel] = {}  # program energy registers per appliance
+        self._appl_roles: dict[str, dict[str, str]] = {}
+        self._appl_last: dict[str, tuple] = {}
         self.zone_cfg: dict[str, dict] = {}            # name, area, insulation, window sensor
         self._zones_without_seed: set[str] = set()
         self.zone_windows: dict[str, str | None] = {}
@@ -206,6 +218,10 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.warning_active: bool = False
         self.safe_mode_active: bool = False
         self.safe_mode_sensor_ok: bool = True
+        self.startup_wait: bool = False
+        self._started_at: datetime = dt_util.now()
+        self._grid_seen_ok: bool = False
+        self._grid_missing_since: datetime | None = None
         self._safe_mode_hour: str | None = None
         self._safe_mode_since: datetime | None = None
         self.last_plan_ts: datetime | None = None
@@ -273,6 +289,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.price_engine.spot_history = dict(saved.get("spot_history", {}))
         self.shadow = ShadowEvaluator.from_dict(saved.get("shadow"))
         self.plan_history = list(saved.get("plan_history", []))[-168:]
+        for aid, adata in saved.get("appliance_models", {}).items():
+            try:
+                self.appliances[aid] = ApplianceModel.from_dict(adata)
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning("Could not restore appliance register %s", aid)
         for tid, tdata in saved.get("hotwater_models", {}).items():
             try:
                 self.tanks[tid] = HotWaterModel.from_dict(tdata)
@@ -453,6 +474,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         d["spot_history"] = pe.spot_history
         d["thermal_zones"] = {zid: z.to_dict() for zid, z in self.zones.items()}
         d["hotwater_models"] = {tid: m.to_dict() for tid, m in self.tanks.items()}
+        d["appliance_models"] = {aid: m.to_dict() for aid, m in self.appliances.items()}
         d["priorities_plan"] = dict(self.plan_priority)
         d["priorities_dist"] = dict(self.dist_priority)
         d["settings"] = {
@@ -537,6 +559,14 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             self.ev_deadline_enabled.setdefault(eid, True)
             self.ev_min_soc_enabled.setdefault(eid, True)
             self.ev_min_soc.setdefault(eid, 30.0)
+            if data.get(CONF_DEVICE_TYPE) == DeviceType.APPLIANCE:
+                self.committed[eid] = False          # read only – never controlled
+                self._appl_roles.pop(eid, None)      # re-detect after a configuration change
+                m = self.appliances.get(eid)
+                if m is None:
+                    m = self.appliances[eid] = ApplianceModel(device_id=eid)
+                m.default_kwh = float(data.get(CONF_APPL_DEFAULT_KWH) or 1.0)
+                m.default_duration_h = float(data.get(CONF_APPL_DEFAULT_H) or 2.0)
 
     def unregister_subentry(self, entry_id: str) -> None:
         for store in (self.device_entries, self.committed, self.priority_now, self.plan_priority,
@@ -606,6 +636,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         live = self._read_float(d.get(CONF_POWER_SENSOR))
         if live is not None:
             return max(0.0, live), "measured"
+        if d.get(CONF_DEVICE_TYPE) == DeviceType.APPLIANCE:
+            s_ = self.appliance_status(entry_id)
+            if s_["state_class"] == "running" and s_["expected_duration_h"]:
+                return round(float(s_["expected_kwh"] or 0) / float(s_["expected_duration_h"]), 3), "assumed"
+            return 0.0, "off"
         if d.get(CONF_DEVICE_TYPE) == DeviceType.EV_CHARGER:
             charging = None
             raw, _ = self.ev_status(d)
@@ -1270,6 +1305,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 min_energy_kwh=min_need if min_dl else 0.0,
                 min_deadline=min_dl,
             )
+        elif dtype == DeviceType.APPLIANCE:
+            spec["committed"] = False
+            spec["fixed_load_15m"] = self.appliance_expected_15m(eid)
         elif dtype == DeviceType.SWITCH:
             spec.update(
                 runtime_hours=self.runtime_hours.get(eid, 2.0),
@@ -1420,14 +1458,32 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         budget_kw, sensor_bad = self.limiters.evaluate_total_budget_kw(grid_valid, raw_now)
         # Safe mode is latched until the end of the clock hour: when the grid measurement comes
         # back mid-hour the energy of the missing period is unknown, so the safe budget is kept.
+        # 2.13.0: no safe mode during the start-up grace period (HA restart: the meter reader
+        # needs a few seconds to reconnect; the hour's energy is restored from storage). During
+        # the grace period nothing is switched – no more power is granted, nothing is cut.
+        # Safe mode is latched to the end of the hour only after a REAL outage (> 2 min while
+        # running). With an hourly energy sensor the hour's energy is known, so safe mode is
+        # released as soon as the measurement is back.
         hour_key_now = now.strftime("%Y-%m-%dT%H")
-        if sensor_bad:
-            self._safe_mode_hour = hour_key_now
+        if grid_valid:
+            self._grid_seen_ok = True
+            self._grid_missing_since = None
+        elif self._grid_missing_since is None:
+            self._grid_missing_since = now
+        self.startup_wait = (not self._grid_seen_ok
+                             and (now - self._started_at).total_seconds() < STARTUP_GRACE_S)
+        missing_s = (now - self._grid_missing_since).total_seconds() if self._grid_missing_since else 0.0
+        if sensor_bad and not self.startup_wait:
+            if missing_s >= SAFE_MODE_LATCH_S:
+                self._safe_mode_hour = hour_key_now
             self._safe_mode_since = self._safe_mode_since or now
-        elif self._safe_mode_hour is not None and self._safe_mode_hour != hour_key_now:
-            self._safe_mode_hour = None
-            self._safe_mode_since = None
-        self.safe_mode_active = self._safe_mode_hour is not None
+        if not sensor_bad:
+            if self._safe_mode_hour is not None and (
+                    self._safe_mode_hour != hour_key_now or self.hour_energy_source == "hour_sensor"):
+                self._safe_mode_hour = None
+            if self._safe_mode_hour is None:
+                self._safe_mode_since = None
+        self.safe_mode_active = (sensor_bad and not self.startup_wait) or self._safe_mode_hour is not None
         self.safe_mode_sensor_ok = not sensor_bad
         if self.safe_mode_active and not sensor_bad:
             from .const import SAFE_MODE_MAX_KW
@@ -1447,6 +1503,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._update_day_counters(dt_s)
         self._update_mode_transitions(now)
         self._track_ev_sessions(now)
+        self._update_appliances(now)
 
         dist_inputs = []
         for eid in self.device_entries:
@@ -1468,6 +1525,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "opportunistic_need": self.plan_result.unmet.get(eid, 0.0) > 0.1,
             })
         self.allocations = self.distributor.distribute(dist_inputs, budget_kw, phase_limits, self.phase_currents)
+        if self.startup_wait:
+            # waiting for the first grid reading after start-up: send nothing
+            return self._build_state_snapshot()
 
         for eid in list(self.device_entries):
             if not self.committed.get(eid, False):
@@ -1670,6 +1730,142 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     "water_temp": self._read_float(d.get(CONF_WATER_TEMP_SENSOR)),
                     "has_temp_sensor": bool(d.get(CONF_WATER_TEMP_SENSOR)), "has_power_sensor": bool(d.get(CONF_POWER_SENSOR))}
             out.append({**base, **(tank.summary() if tank else {"status": "no_model"})})
+        return out
+
+    # ------------------------------------------------------------------ household appliances
+    def appliance_roles(self, eid: str) -> dict[str, str]:
+        """Role -> entity id. Explicit choices in the configuration win; the rest is found in
+        the entities of the chosen HA device (Home Connect Alt naming)."""
+        d = self.device_cfg(eid)
+        roles = self._appl_roles.get(eid)
+        if roles is None:
+            roles = {}
+            dev_id = d.get(CONF_APPLIANCE_DEVICE)
+            if dev_id:
+                try:
+                    reg = er.async_get(self.hass)
+                    ents = [(e.entity_id, f"{e.translation_key or ''} {e.original_name or ''}")
+                            for e in er.async_entries_for_device(reg, dev_id)]
+                    roles = detect_roles(ents)
+                except Exception:  # noqa: BLE001
+                    _LOGGER.debug("Could not read the entities of device %s", dev_id, exc_info=True)
+            self._appl_roles[eid] = roles
+        out = dict(roles)
+        for role, key in APPLIANCE_ROLE_CONF.items():
+            if d.get(key):
+                out[role] = d[key]
+        return out
+
+    def appliance_status(self, eid: str, now: datetime | None = None) -> dict[str, Any]:
+        now = now or dt_util.now()
+        d = self.device_cfg(eid)
+        r = self.appliance_roles(eid)
+
+        def st(role):
+            ent = r.get(role)
+            s_ = self.hass.states.get(ent) if ent else None
+            return s_ if s_ is not None and s_.state not in ("unknown", "unavailable") else None
+        extra = lambda key: tuple(x.strip() for x in str(d.get(key) or "").split(",") if x.strip())  # noqa: E731
+        op = st("operation_state")
+        raw = op.state if op else None
+        cls = appl_classify(raw, extra(CONF_APPL_RUNNING_STATES), extra(CONF_APPL_DELAYED_STATES))
+        prog_st = st("active_program") or st("selected_program")
+        program = prog_st.state if prog_st else None
+        start_at = None
+        s_in = st("start_in")
+        if s_in is not None:
+            h = parse_duration_h(s_in.state, s_in.attributes.get("unit_of_measurement"))
+            if h:
+                start_at = now + timedelta(hours=h)
+        fin = st("finish_at")
+        finish_at = parse_timestamp(fin.state, now) if fin else None
+        rem = st("remaining")
+        remaining_h = parse_duration_h(rem.state, rem.attributes.get("unit_of_measurement")) if rem else None
+        if remaining_h is None and finish_at is not None and cls == "running":
+            remaining_h = max(0.0, (finish_at - now).total_seconds() / 3600)
+        model = self.appliances.get(eid)
+        stats = model.stats(program) if model else None
+        if start_at is None and cls == "delayed" and finish_at is not None and stats:
+            start_at = finish_at - timedelta(hours=stats.duration_h)       # fall back to finish − duration
+        if finish_at is None and start_at is not None and stats:
+            finish_at = start_at + timedelta(hours=stats.duration_h)
+        pr = st("progress")
+        try:
+            progress = float(pr.state) if pr else None
+        except ValueError:
+            progress = None
+        return {"state": raw, "state_class": cls, "program": program, "start_at": start_at,
+                "finish_at": finish_at, "remaining_h": remaining_h, "progress": progress, "roles": r,
+                "expected_kwh": round(stats.kwh, 3) if stats else None,
+                "expected_duration_h": round(stats.duration_h, 3) if stats else None,
+                "learned": bool(stats and stats.runs),
+                "source": ("manual" if stats and stats.manual else "learned" if stats and stats.runs else "default")}
+
+    def appliance_expected_15m(self, eid: str) -> list[float]:
+        """Expected load (kW per 15 min, 288 values from the start of the current hour)."""
+        model = self.appliances.get(eid)
+        if model is None:
+            return []
+        now = dt_util.now()
+        s_ = self.appliance_status(eid, now)
+        start = now.replace(minute=0, second=0, microsecond=0)
+        return model.expected_load(now, start, PLANNING_HORIZON_HOURS * 4, 0.25, s_["state_class"], s_["program"],
+                                   s_["start_at"], s_["remaining_h"], s_["progress"])
+
+    def _update_appliances(self, now: datetime) -> None:
+        """Learn the program register and replan when a program is set/started/ended."""
+        for eid in self.device_entries:
+            d = self.device_cfg(eid)
+            if d.get(CONF_DEVICE_TYPE) != DeviceType.APPLIANCE:
+                continue
+            model = self.appliances.setdefault(eid, ApplianceModel(device_id=eid))
+            s_ = self.appliance_status(eid, now)
+            power = self._read_float(d.get(CONF_POWER_SENSOR))
+            done = model.update(now, s_["state_class"], s_["program"], power)
+            if done:
+                _LOGGER.info("Appliance %s: %s used %.2f kWh in %.1f h", self.device_entries[eid].title,
+                             done["program"], done["kwh"], done["duration_h"])
+                self.schedule_save()
+            start_key = s_["start_at"].replace(second=0, microsecond=0) if s_["start_at"] else None
+            key = (s_["state_class"], s_["program"])
+            last = self._appl_last.get(eid)
+            moved = bool(last and last[2] and start_key and abs((last[2] - start_key).total_seconds()) > 600)
+            if last is None or last[:2] != key or moved:
+                self._appl_last[eid] = (*key, start_key)
+                if last is not None:
+                    self.hass.async_create_task(self.async_run_planner())
+
+    async def async_appliance_program(self, device_id: str, action: str, program: str | None = None,
+                                      kwh: float | None = None, duration_h: float | None = None) -> None:
+        """set | delete | reset (all) for an appliance's program register."""
+        model = self.appliances.get(device_id)
+        if model is None:
+            raise ValueError(f"{device_id} is not a household appliance")
+        if action == "set":
+            if not program:
+                raise ValueError("program is required")
+            model.set_manual(program, kwh, duration_h)
+        elif action == "delete":
+            model.programs.pop(program or "", None)
+        elif action == "reset":
+            model.programs.clear()
+        else:
+            raise ValueError(f"Unknown action {action}")
+        self.schedule_save()
+        await self.async_run_planner()
+        await self.async_request_refresh()
+
+    def appliances_payload(self) -> list[dict]:
+        out = []
+        for eid in self.device_entries:
+            if self.device_cfg(eid).get(CONF_DEVICE_TYPE) != DeviceType.APPLIANCE:
+                continue
+            m = self.appliances.get(eid)
+            s_ = self.appliance_status(eid)
+            out.append({"device_id": eid, "name": self.device_entries[eid].title,
+                        "has_power_sensor": bool(self.device_cfg(eid).get(CONF_POWER_SENSOR)),
+                        "state": s_["state"], "state_class": s_["state_class"], "program": s_["program"],
+                        "roles": s_["roles"], **(m.summary() if m else {})})
         return out
 
     def command_interval_s(self, eid: str) -> float:
@@ -2078,6 +2274,16 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                      "car_current_limit_a": cfg_value(CONF_EV_CAR_LIMIT_ENTITY),
                      "max_current_a": self.ev_max_current_a(d),
                      "commanded_current_a": self._last_ev_target_a.get(eid)}
+        elif dtype == DeviceType.APPLIANCE:
+            s_ = self.appliance_status(eid, now)
+            entities.update(committed=None, priority_now=None, **{f"appl_{k}": v for k, v in s_["roles"].items()})
+            iso = lambda v: v.isoformat() if v else None  # noqa: E731
+            extra = {"appliance_state": s_["state"], "appliance_state_class": s_["state_class"],
+                     "program": s_["program"], "start_at": iso(s_["start_at"]), "finish_at": iso(s_["finish_at"]),
+                     "remaining_h": s_["remaining_h"], "progress": s_["progress"],
+                     "expected_kwh": s_["expected_kwh"], "expected_duration_h": s_["expected_duration_h"],
+                     "program_learned": s_["learned"], "expected_source": s_["source"],
+                     "programs_known": len(self.appliances[eid].programs) if eid in self.appliances else 0}
         elif dtype == DeviceType.SWITCH:
             entities.update(runtime_hours=self.own_entity_id("number", f"{eid}_runtime_hours"))
             extra = {"runtime_required_h": self.runtime_hours.get(eid, 2.0),
@@ -2341,6 +2547,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "settings": self._settings_entities(),
             "thermal_zones": self.thermal_zones_payload(),
             "hotwater_models": self.hotwater_models_payload(),
+            "appliances": self.appliances_payload(),
             "kpi": {
                 "grid_power_kw": round(self.grid_power_kw, 3),
                 "limit_now_kw": self.limit_now_kw,
@@ -2358,6 +2565,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "warning": self.warning_active,
                 "safe_mode": self.safe_mode_active,
                 "safe_mode_sensor_ok": self.safe_mode_sensor_ok,
+                "startup_wait": self.startup_wait,
+                "safe_mode_latched": self._safe_mode_hour is not None,
                 "safe_mode_since": self._safe_mode_since.isoformat() if self._safe_mode_since else None,
                 "step_locked": pe.active_tariff_kw > pe.selected_tariff_kw,
                 "hour_energy_source": self.hour_energy_source,

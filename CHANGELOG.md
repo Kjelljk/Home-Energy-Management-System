@@ -1,5 +1,47 @@
 # Changelog
 
+## 2.13.0
+
+### Safe mode after a restart (fix)
+- Start-up grace period of 3 minutes: while waiting for the first grid reading after a restart
+  there is no safe mode and nothing is switched (no more power is granted, nothing is cut). The
+  hour's energy is continued from storage. The Overview shows "STARTING · waiting for the first
+  grid reading" and a pill in the header.
+- Safe mode is latched to the end of the hour only after a real outage (grid reading missing for
+  more than 2 minutes while running). A short gap gives the safe budget only while it lasts.
+- With an *Energy this hour sensor* configured the hour's energy is known, so safe mode is released
+  as soon as the measurement is back.
+
+### Household appliances (new device type, read only)
+- New type *Household appliance* for dishwasher, oven, washing machine … Power Controller never
+  controls or interrupts it; it plans the other devices around it.
+- Home Connect Alt: choose the HA device and the entities are found automatically (operation state,
+  active/selected program, start time / start in relative, finish at, remaining time, progress,
+  door, remote start …). Every role can be overridden, so devices from other integrations (e.g.
+  a washer from LocalThings) can be set up manually; extra state values for "running" and
+  "delayed start" can be added.
+- Home Connect "Start time" 17:42 is read as *starts in 17 h 42 min*; numbers use the sensor's unit
+  (oven "Start In Relative" in seconds). Unavailable sensors (normal for Home Connect when idle) mean
+  "not in use", not an error.
+- **Program energy register** per appliance: every finished run is recorded per program with
+  energy, duration and the power profile over the run, from a power sensor that may belong to
+  another device (e.g. a smart plug). Until a program is learned a configurable default
+  (kWh and hours) is used; programs can be added or adjusted manually and deleted.
+- Planning: a program waiting for its delayed start, or running, is added as a fixed load with the
+  program's learned profile (from the start time, or the remaining part from progress / remaining
+  time). The plan is recalculated when a program is set, starts, ends or the start time moves.
+- Object card: state, program, start and finish time, progress, expected energy (learned / manual /
+  default), live power and the expected load in the 24 h strip; "Read only" instead of the
+  Committed badge.
+- Settings page: program register per appliance (runs, kWh, hours, last run), manual entry, delete,
+  reset, and the list of entities used. Service `power_controller.appliance_program`.
+
+### Tests
+- 6 new tests (123 total): start-up grace and latching after a real outage, state/time parsing,
+  role detection from Home Connect names, program register learning, expected load for delayed and
+  running programs, planner around a delayed dishwasher, coordinator end-to-end (delayed start →
+  run measured on a plug → register).
+
 ## 2.12.1
 
 ### Live power was replaced by an estimate (bug fix)
