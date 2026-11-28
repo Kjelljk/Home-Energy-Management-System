@@ -1,5 +1,51 @@
 # Changelog
 
+## 2.13.1
+
+### Live power flow (Distribution page)
+- The right half is ordered top-down: **Baseload** (arrow from Grid), then the **devices that are not
+  controlled** directly below it (each with a dashed arrow from Grid and its measured kW), then the
+  **controlled devices** fed from Distribution as before. The separate "Not controlled" box is removed –
+  the devices stand there themselves. The narrow (phone) layout follows the same order.
+
+### Appliance card
+- Collapsible *Details* like the EV card: the plan strip and progress bar stay visible; state, program,
+  start/finish, expected energy, power and register size are in *Details* with a one-line summary
+  ("Bomull 40 · 0.95 kWh · 0.00 kW"). Open/closed is remembered per card in the browser.
+
+### EV card
+- **Warning when status and measurement disagree** (shown when it has lasted 2 minutes, removed as soon
+  as it is resolved): status *Charging* but ~0 kW measured; status not charging but the car draws power;
+  power sensor and charging-current sensor do not match (P ≠ I × 230 V – typically a sensor from another
+  device); the charger offers a different current than Power Controller set (committed only).
+- **Sensors in the configuration** under *Details*: every sensor/switch chosen for the charger with its
+  entity id and its value now (live from Home Assistant); *unavailable* / *not found* in red; tap a row to
+  open the entity. Also on the uncommitted card.
+- Card contract: `entities.charge_switch`, `entities.transaction`, `entities.availability_switch` and
+  `ev_warnings` (list of messages).
+
+### Grid tariff on the Settings page
+- New section *Grid tariff periods*: for each period of a price list edit **name, price, from/to hour,
+  days and months** (none = all year), with a plain summary ("Applies Mon–Fri, 06:00–22:00, all year.").
+  Save per period; unsaved periods are marked and not overwritten by the 10-s refresh. Price-list
+  selector when there is more than one version. No reload – the period keeps its id and its price
+  entity. Adding/removing periods, capacity steps and new price lists stay under Configure → Grid tariff.
+  New admin websocket command `power_controller/tariff_period`.
+
+### Program names (household appliances)
+- Readable names instead of keys: `Dishcare.Dishwasher.Program.Eco50` → "Eco 50",
+  `LaundryCare.Washer.Program.Cotton` → "Cotton", `quick_wash` → "Quick wash". Numeric codes stay.
+- **Own name per program** in the register on the Settings page (e.g. the code "22" → "Bomull 40"),
+  saved when you leave the field; the current program can be named before it has been learned. The name
+  is used on the card, in the panel and in the register; the key is shown small underneath.
+- Service `power_controller.appliance_program`: new action `name` and field `name` (also accepted by `set`).
+
+### Tests
+- 5 new tests (128 total): program names and persistence, tariff period edit and validation, EV
+  status/measurement checks, coordinator end-to-end (warning only after 2 min, sensor entities in the
+  contract, program name, tariff edit + error). Frontend checked in Chromium with a mock hass (wide and
+  390 px flow, tariff editor incl. save/validation, register rename, cards light/dark).
+
 ## 2.13.0
 
 ### Safe mode after a restart (fix)

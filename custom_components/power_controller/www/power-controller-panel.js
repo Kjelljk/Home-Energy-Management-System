@@ -12,7 +12,7 @@
  * Data: websocket "power_controller/overview" every 10 s; recorder history/statistics every 60 s.
  * Styling: Home Assistant theme variables only. No external dependencies.
  */
-const PCP_VERSION = "2.13.0";
+const PCP_VERSION = "2.13.1";
 const PCP_IMG = "/power_controller_frontend/img";
 const PCP_COLORS = ["#f97316", "#8b5cf6", "#06b6d4", "#22c55e", "#ec4899", "#eab308", "#3b82f6", "#14b8a6", "#ef4444", "#a855f7"];
 const PCP_STATUS = {
@@ -39,7 +39,7 @@ const PCP_HELP = {
   shadow_extra_fee: "A fixed monthly fee for the alternative agreement (e.g. a spot agreement's fee), added in the comparison.",
   grid_default: "Grid energy charge (energiledd) for all hours that are not covered by a period, e.g. nights and weekends.",
   grid_fee: "Consumption tax (forbruksavgift) + Enova fee per kWh. Added to every hour.",
-  grid_period: "Grid energy charge for this period of the active price list. Hours, days and months are edited under Settings → Devices & services → Power Controller → Configure → Grid tariff.",
+  grid_period: "Grid energy charge for this period of the active price list. Hours, days and months are edited below under Grid tariff periods.",
   workday_wake: "Workday: when you usually get up. Comfort rooms are warm from this time.",
   workday_leave: "Workday: when you usually leave for work. After this the house counts as away (or home office).",
   workday_back: "Workday: when you usually come home. Rooms are pre-heated to be warm at this time.",
@@ -449,9 +449,11 @@ class PowerControllerPanel extends HTMLElement {
 
         <section id="v-se" hidden>
           <div class="card mb"><div class="hd"><div><h2>Settings</h2><div class="hint">The values you change most often. Changes are saved and the plan is recalculated at once.
-            Sensors, devices, zones and the full grid-tariff editor (hours, days, capacity steps, new price lists) are under Settings → Devices &amp; services.</div></div>
+            Sensors, devices, zones, capacity steps, new price lists and adding or removing tariff periods are under Settings → Devices &amp; services.</div></div>
             <a class="btn" href="/config/integrations/integration/power_controller">Open integration settings</a></div></div>
           <div class="setg" id="setg"></div>
+          <div class="hd" style="margin:18px 0 10px"><div><h2>Grid tariff periods</h2><div class="hint">The hours, days and months each grid-tariff price applies to. Periods are checked from the top – the first match decides the price; all other hours use the default price. Press Save on a period to store it; the plan is recalculated at once.</div></div><span id="tfsel"></span></div>
+          <div class="setg tzg" id="tfe"></div>
           <div class="hd" style="margin:18px 0 10px"><div><h2>Thermal models</h2><div class="hint">What Power Controller has learned about each zone (room). The planner uses this to pre-heat at the right time. Values improve over days to weeks.</div></div></div>
           <div class="setg tzg" id="thz"></div>
           <div class="hd" style="margin:18px 0 10px"><div><h2>Hot-water models</h2><div class="hint">Learned per water heater from the tank temperature and the element's power: standby loss and when hot water is used. The planner uses these instead of fixed defaults.</div></div></div>
@@ -965,6 +967,8 @@ class PowerControllerPanel extends HTMLElement {
       const nb = this.shadowRoot.getElementById("ntest");
       if (nb && !nb._b) { nb._b = true; nb.addEventListener("click", () => { this._call("power_controller", "test_notification", {}); this._say("Test notification sent"); }); }
     }
+    const tfe = this.shadowRoot.getElementById("tfe");
+    if (tfe && !(typing && (tfe.contains(active) || this.shadowRoot.getElementById("tfsel")?.contains(active)))) this._renderTariffEditor(d, tfe);
     const ap = this.shadowRoot.getElementById("apm");
     if (ap && !(typing && ap.contains(active))) this._renderAppliances(d, ap);
     const hw = this.shadowRoot.getElementById("hwm");
@@ -1024,6 +1028,91 @@ class PowerControllerPanel extends HTMLElement {
     });
   }
 
+  // ------------------------------------------------------------------ GRID TARIFF PERIODS (2.13.1)
+  _renderTariffEditor(d, box) {
+    const te = d.tariff_editor;
+    if (!te || !(te.versions || []).length) { box.innerHTML = `<div class="card"><div class="hint">No grid tariff loaded.</div></div>`; return; }
+    this._tdirty = this._tdirty || new Set();
+    if (!te.versions.some((v) => v.id === this._tvid)) this._tvid = te.active_id;
+    const sig = JSON.stringify(te) + this._tvid;
+    if (sig === this._tsig || this._tdirty.size) return;     // unchanged, or unsaved edits on screen
+    this._tsig = sig;
+    const v = te.versions.find((x) => x.id === this._tvid);
+    const sel = this.shadowRoot.getElementById("tfsel");
+    sel.innerHTML = te.versions.length > 1 ? `<label class="sf" style="border:0;padding:0"><span>Price list</span><span class="sc2"><select id="tfv">${te.versions.map((x) =>
+      `<option value="${pE(x.id)}" ${x.id === this._tvid ? "selected" : ""}>${pE(x.name)} · from ${pE(x.valid_from)}${x.id === te.active_id ? " (in use)" : ""}</option>`).join("")}</select></span></label>` : "";
+    sel.querySelector("#tfv")?.addEventListener("change", (ev) => { this._tvid = ev.target.value; this._tdirty.clear(); this._tsig = null; this._renderTariffEditor(this._data, box); });
+    const DAYS = [["mon", "Mon"], ["tue", "Tue"], ["wed", "Wed"], ["thu", "Thu"], ["fri", "Fri"], ["sat", "Sat"], ["sun", "Sun"]];
+    const MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const hh = (h) => `${String(h).padStart(2, "0")}:00`;
+    const vat = v.prices_include_vat ? "incl. VAT" : "excl. VAT";
+    if (!v.periods.length) {
+      box.innerHTML = `<div class="card"><div class="hint">${pE(v.name)} has no periods – every hour uses the default price ${pF(v.default_price, 4)} NOK/kWh (${vat}). Add periods under Configure → Grid tariff.</div></div>`;
+      return;
+    }
+    box.innerHTML = v.periods.map((p, i) => `<div class="card tp" data-pid="${pE(p.id)}">
+      <div class="hd"><label class="tpn"><span class="sr">Name</span><input type="text" data-f="name" value="${pE(p.name)}" maxlength="40" aria-label="Period name"></label>
+        <span class="chip c-mut">#${i + 1}${i === 0 ? " · checked first" : ""}</span></div>
+      <div class="tpg">
+        <label class="sf"><span>Price${this._help(`Grid energy charge (energiledd) in this period, entered ${vat} as in the price list.`)}</span>
+          <span class="sc2"><input type="number" data-f="price" min="0" max="10" step="0.0001" value="${pE(p.price)}" inputmode="decimal"><span class="u">NOK/kWh</span></span></label>
+        <label class="sf"><span>From${this._help("First hour of the period (inclusive).")}</span><span class="sc2"><select data-f="start">${[...Array(24).keys()].map((h) =>
+          `<option value="${h}" ${h === p.start_hour ? "selected" : ""}>${hh(h)}</option>`).join("")}</select></span></label>
+        <label class="sf"><span>To${this._help("The period ends at this hour (exclusive). 22 → 06 crosses midnight; 00 → 24 is the whole day.")}</span><span class="sc2"><select data-f="end">${[...Array(24).keys()].map((h) => h + 1).map((h) =>
+          `<option value="${h}" ${h === (p.end_hour || 24) ? "selected" : ""}>${hh(h)}</option>`).join("")}</select></span></label>
+      </div>
+      <div class="tpl">Days <button type="button" class="lnk" data-q="wd">weekdays</button> · <button type="button" class="lnk" data-q="all">all</button></div>
+      <div class="chips2" role="group" aria-label="Days">${DAYS.map(([k, l]) => `<button type="button" class="chip3" data-day="${k}" aria-pressed="${p.days.includes(k)}">${l}</button>`).join("")}</div>
+      <div class="tpl">Months <span class="hint">(none selected = all year)</span></div>
+      <div class="chips2" role="group" aria-label="Months">${MON.map((l, j) => `<button type="button" class="chip3" data-mon="${j + 1}" aria-pressed="${p.months.includes(j + 1)}">${l}</button>`).join("")}</div>
+      <div class="tps hint" aria-live="polite"></div>
+      <div class="tzb"><button type="button" class="btn pri" data-a="save">Save</button><button type="button" class="btn" data-a="reset">Undo changes</button><span class="tpm hint" role="status"></span></div>
+    </div>`).join("");
+    const describe = (card) => {
+      const days = [...card.querySelectorAll("[data-day][aria-pressed=true]")].map((b) => b.dataset.day);
+      const mons = [...card.querySelectorAll("[data-mon][aria-pressed=true]")].map((b) => Number(b.dataset.mon));
+      const a = Number(card.querySelector("[data-f=start]").value), b = Number(card.querySelector("[data-f=end]").value);
+      const dtxt = days.length === 7 ? "every day" : days.join(",") === "mon,tue,wed,thu,fri" ? "Mon–Fri" : days.join(",") === "sat,sun" ? "Sat–Sun"
+        : days.map((k) => DAYS.find((x) => x[0] === k)[1]).join(", ") || "no days";
+      const mtxt = !mons.length || mons.length === 12 ? "all year" : mons.map((m) => MON[m - 1]).join(", ");
+      const span = a === b % 24 ? "all day" : `${hh(a)}–${hh(b)}${b <= a ? " (over midnight)" : ""}`;
+      card.querySelector(".tps").textContent = `Applies ${dtxt}, ${span}, ${mtxt}.`;
+      return { days, mons, a, b };
+    };
+    box.querySelectorAll(".tp").forEach((card) => {
+      const pid = card.dataset.pid, msg = card.querySelector(".tpm");
+      const dirty = () => { this._tdirty.add(pid); card.classList.add("dirty"); msg.textContent = "Not saved"; describe(card); };
+      describe(card);
+      card.querySelectorAll("[data-day],[data-mon]").forEach((b) => b.addEventListener("click", () => {
+        b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true"); dirty(); }));
+      card.querySelectorAll("[data-q]").forEach((b) => b.addEventListener("click", () => {
+        card.querySelectorAll("[data-day]").forEach((x) => x.setAttribute("aria-pressed", b.dataset.q === "all" || !["sat", "sun"].includes(x.dataset.day)));
+        dirty(); }));
+      card.querySelectorAll("input,select").forEach((el) => el.addEventListener("input", dirty));
+      card.querySelector("[data-a=reset]").addEventListener("click", () => { this._tdirty.clear(); this._tsig = null; this._renderTariffEditor(this._data, box); });
+      card.querySelector("[data-a=save]").addEventListener("click", async () => {
+        const { days, mons, a, b } = describe(card);
+        const name = card.querySelector("[data-f=name]").value.trim(), price = Number(card.querySelector("[data-f=price]").value);
+        if (!name) { msg.textContent = "The period needs a name."; return; }
+        if (!days.length) { msg.textContent = "Choose at least one day."; return; }
+        if (card.querySelector("[data-f=price]").value === "" || !(price >= 0 && price <= 10)) { msg.textContent = "The price must be 0–10 NOK/kWh."; return; }
+        msg.textContent = "Saving…";
+        try {
+          const res = await this._hass.callWS({ type: "power_controller/tariff_period", version_id: this._tvid, period_id: pid,
+            name, price, days, start_hour: a, end_hour: b, months: mons.length === 12 ? [] : mons });
+          this._data.tariff_editor = res;
+          this._tdirty.delete(pid);
+          card.classList.remove("dirty");
+          this._say(`Grid tariff period ${name} saved. Replanning.`);
+          if (!this._tdirty.size) { this._tsig = null; this._renderTariffEditor(this._data, box); }
+          else msg.textContent = "Saved";
+          setTimeout(() => this._fetch(), 1200);
+        } catch (err) { msg.textContent = `Not saved: ${err?.message || err}`; }
+      });
+    });
+    this._bindHelp(box);
+  }
+
   // ------------------------------------------------------------------ APPLIANCES
   _renderAppliances(d, box) {
     const list = d.appliances || [];
@@ -1034,17 +1123,26 @@ class PowerControllerPanel extends HTMLElement {
       const cur = (a.programs || []).find((p) => p.program === a.program);
       const fk = cur ? cur.kwh : a.default_kwh, fd = cur ? cur.duration_h : a.default_duration_h;
       const roles = Object.entries(a.roles || {}).map(([k, v]) => `<span>${pE(k.replace(/_/g, " "))}</span><b>${pE(v)}</b>`).join("");
-      const rows = (a.programs || []).map((p) => `<tr><td>${pE(p.program)}${p.manual ? ' <small class="hint">manual</small>' : ""}</td><td class="num">${p.runs}</td>
-        <td class="num">${pF(p.kwh, 2)}</td><td class="num">${pF(p.duration_h, 2)}</td><td class="num">${p.last_kwh === null || p.last_kwh === undefined ? "–" : pF(p.last_kwh, 2)}</td>
-        <td><button type="button" class="ab" data-del="${pE(p.program)}" aria-label="Delete ${pE(p.program)}">✕</button></td></tr>`).join("");
+      // register rows + the current program and named programs that have not run yet (so a code like
+      // "22" can be given a name before it is learned)
+      const names = a.names || {};
+      const known = new Set((a.programs || []).map((p) => p.program));
+      const extra = [...new Set([a.program, ...Object.keys(names)].filter((k) => k && !known.has(k)))]
+        .map((k) => ({ program: k, name: names[k] || k, named: !!names[k], runs: 0, kwh: null, duration_h: null, last_kwh: null, pending: true }));
+      const nameIn = (p) => `<input type="text" class="pname" data-name="${pE(p.program)}" value="${pE(names[p.program] || "")}" placeholder="${pE(p.name || p.program)}" maxlength="60" aria-label="Name for program ${pE(p.program)}">`;
+      const rows = [...(a.programs || []), ...extra].map((p) => `<tr><td>${nameIn(p)}<small class="pcode">${pE(p.program)}${p.manual ? " · manual" : ""}${p.pending ? " · not learned yet" : ""}</small></td><td class="num">${p.runs}</td>
+        <td class="num">${p.pending ? "–" : pF(p.kwh, 2)}</td><td class="num">${p.pending ? "–" : pF(p.duration_h, 2)}</td><td class="num">${p.last_kwh === null || p.last_kwh === undefined ? "–" : pF(p.last_kwh, 2)}</td>
+        <td>${p.pending ? "" : `<button type="button" class="ab" data-del="${pE(p.program)}" aria-label="Delete ${pE(p.program)}">✕</button>`}</td></tr>`).join("");
       return `<div class="card ap" data-dev="${pE(a.device_id)}">
-        <div class="hd"><div><h2>${pE(a.name)}</h2><div class="hint">${a.program ? pE(a.program) + " · " : ""}${pE(a.state || "–")}${a.running ? ` · this run so far ${pF(a.run_kwh_so_far, 2)} kWh` : ""}</div></div><span class="chip c-${st[1]}">${st[0]}</span></div>
+        <div class="hd"><div><h2>${pE(a.name)}</h2><div class="hint">${a.program ? pE(a.program_name || a.program) + " · " : ""}${pE(a.state || "–")}${a.running ? ` · this run so far ${pF(a.run_kwh_so_far, 2)} kWh` : ""}</div></div><span class="chip c-${st[1]}">${st[0]}</span></div>
         ${a.has_power_sensor ? "" : `<div class="hint warnt" style="margin-bottom:8px">No power sensor – the register cannot learn. Choose one under Configure (it may belong to another device, e.g. a smart plug).</div>`}
-        <table class="aptab"><thead><tr><th>Program</th><th class="num">Runs</th><th class="num">kWh</th><th class="num">Hours</th><th class="num">Last kWh</th><th></th></tr></thead>
+        <div class="hint" style="margin-bottom:4px">Type a name to replace a code (e.g. “22” → “Cotton 40”); it is saved when you leave the field.</div>
+        <table class="aptab"><thead><tr><th>Program · your name</th><th class="num">Runs</th><th class="num">kWh</th><th class="num">Hours</th><th class="num">Last kWh</th><th></th></tr></thead>
         <tbody>${rows || `<tr><td colspan="6" class="hint">No program learned yet. Until then ${pF(a.default_kwh, 2)} kWh over ${pF(a.default_duration_h, 1)} h is assumed.</td></tr>`}</tbody></table>
         <details class="tzm"><summary>Add / adjust a program manually</summary>
           <div class="tzr">
-            <label class="sf"><span>Program (exact name)</span><span class="sc2"><input type="text" data-f="prog" value="${pE(a.program || "")}" style="width:170px"></span></label>
+            <label class="sf"><span>Program (exact key as reported)</span><span class="sc2"><input type="text" data-f="prog" value="${pE(a.program || "")}" style="width:170px"></span></label>
+            <label class="sf"><span>Your name (optional)</span><span class="sc2"><input type="text" data-f="pname" value="${pE(names[a.program] || "")}" maxlength="60" style="width:170px"></span></label>
             <label class="sf"><span>Energy per run</span><span class="sc2"><input type="number" step="0.05" min="0" max="50" data-f="kwh" value="${pF(fk, 2)}"><span class="u">kWh</span></span></label>
             <label class="sf"><span>Duration</span><span class="sc2"><input type="number" step="0.05" min="0.05" max="24" data-f="dur" value="${pF(fd, 2)}"><span class="u">h</span></span></label>
           </div>
@@ -1053,6 +1151,7 @@ class PowerControllerPanel extends HTMLElement {
         <details class="tzm"><summary>Entities used</summary><div class="kv">${roles || '<span class="hint">none found – choose the device or the entities under Configure</span>'}</div></details>
       </div>`;
     }).join("");
+    const names_ = (dev) => (list.find((x) => x.device_id === dev) || {}).names || {};
     box.querySelectorAll(".ap").forEach((card) => {
       const dev = card.dataset.dev;
       card.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => {
@@ -1066,9 +1165,20 @@ class PowerControllerPanel extends HTMLElement {
         }
         const prog = card.querySelector("[data-f=prog]").value.trim(), kwh = Number(card.querySelector("[data-f=kwh]").value), dur = Number(card.querySelector("[data-f=dur]").value);
         if (!prog || !(kwh >= 0) || !(dur > 0)) { this._say("Enter program, kWh and duration"); return; }
-        this._call("power_controller", "appliance_program", { device_id: dev, action: "set", program: prog, kwh, duration_h: dur });
-        this._say(`Program ${prog} saved`);
+        const pname = card.querySelector("[data-f=pname]").value.trim();
+        this._call("power_controller", "appliance_program", { device_id: dev, action: "set", program: prog, kwh, duration_h: dur, name: pname });
+        this._say(`Program ${pname || prog} saved`);
       }));
+      card.querySelectorAll("[data-name]").forEach((inp) => {
+        const save = () => {
+          const prog = inp.dataset.name, name = inp.value.trim();
+          if (name === (names_(dev)[prog] || "")) return;
+          this._call("power_controller", "appliance_program", { device_id: dev, action: "name", program: prog, name });
+          this._say(name ? `${prog} is now shown as ${name}` : `Name for ${prog} removed`);
+        };
+        inp.addEventListener("change", save);
+        inp.addEventListener("keydown", (ev) => { if (ev.key === "Enter") { ev.preventDefault(); inp.blur(); } });
+      });
     });
   }
 
@@ -1305,45 +1415,48 @@ class PowerControllerPanel extends HTMLElement {
       { key: "oa", title: "Overload acceptance", lines: ["L1", "L2", "L3"].map((ph) => `${ph} ${oa[ph]?.state || "ok"} · ${pF(oa[ph]?.budget_pct, 0)} %`), c: oaWorst },
       { key: "dist", title: "Distribution", lines: [`budget ${pF(dist.budget_kw)} kW`, `reserved ${pF(dist.reserved_kw)} · lent ${pF(dist.lent_kw)} kW`, `unused ${pF(dist.unused_kw)} kW`], c: "#5f7f6a" },
     ];
+    // 2.13.1: right half top-down = Baseload, then the devices that are NOT controlled (each fed
+    // straight from the grid, dashed), then the controlled devices fed from Distribution.
     const side = [
-      { key: "base", title: "Baseload", lines: [`${pF(f.baseload_kw)} kW`, "not controllable"], c: "#94a3b8" },
-      { key: "unc", title: "Not controlled", lines: [`${pF(f.uncommitted_kw)} kW`, "uncommitted devices"], c: "#94a3b8" },
+      { key: "base", title: "Baseload", lines: [`${pF(f.baseload_kw)} kW`, "not controllable · from the grid"], c: "#94a3b8" },
     ];
     const devs = d.devices.map((x, i) => ({ ...x, i }));
+    const devs1 = devs.filter((x) => x.committed), devs0 = devs.filter((x) => !x.committed);
     const boxes = {}; let s = "", H;
+    const kwOf = (x) => (x.power_source === "measured" || x.power_source === "measured_current" ? pN(x.live_kw) ?? 0 : null);
     if (wide) {
-      // LEFT HALF: the limiter chain top-down, consumers that are subtracted first beside the grid.
-      // RIGHT HALF: one row per device. Lines only cross the gap between the halves.
-      // LEFT HALF: limiter chain. RIGHT HALF: baseload + not controlled at the top (fed directly
-      // from the grid), the controlled devices below them – no box covers an arrow.
       const half = W / 2, pad = 10, gapX = 70, colW = Math.min(300, half - gapX / 2 - pad - 20);
       const cx = pad, bh = 70, vgap = 22;
       chain.forEach((b, i) => { boxes[b.key] = { x: cx, y: 8 + i * (bh + vgap), w: colW, h: bh, ...b }; });
       const dx = half + gapX / 2, dw = W - dx - 120, dh = 58, dgap = 14;
-      side.forEach((b, i) => { boxes[b.key] = { x: dx, y: 8 + i * (54 + 10), w: dw, h: 54, ...b }; });
-      const sideH = 8 + side.length * 64 + 18;
+      boxes.base = { x: dx, y: 8, w: dw, h: 54, ...side[0] };
+      let yu = 8 + 54 + dgap;
+      devs0.forEach((x) => { boxes[x.entry_id] = { x: dx, y: yu, w: dw, h: dh }; yu += dh + dgap; });
       const chainH = 8 + chain.length * (bh + vgap);
-      const devs1 = devs.filter((x) => x.committed), devs0 = devs.filter((x) => !x.committed);
-      const y0 = Math.max(sideH, boxes.dist.y + boxes.dist.h / 2 - (devs1.length * (dh + dgap)) / 2);
+      const y0 = Math.max(yu + (devs0.length ? 12 : 4), boxes.dist.y + boxes.dist.h / 2 - (devs1.length * (dh + dgap)) / 2);
       devs1.forEach((x, i) => { boxes[x.entry_id] = { x: dx, y: y0 + i * (dh + dgap), w: dw, h: dh }; });
-      let yu = y0 + devs1.length * (dh + dgap) + (devs0.length ? 18 : 0);
-      if (devs0.length) s += `<text x="${dx}" y="${yu - 6}" class="tx">Not controlled (counted as load)</text>`;
-      devs0.forEach((x, i) => { boxes[x.entry_id] = { x: dx, y: yu + i * (dh + dgap), w: dw, h: dh }; });
-      H = Math.max(chainH, yu + devs0.length * (dh + dgap)) + 10;
+      H = Math.max(chainH, y0 + devs1.length * (dh + dgap)) + 10;
       for (let i = 0; i < chain.length - 1; i++) {
         const a = boxes[chain[i].key], b = boxes[chain[i + 1].key];
         s += `<line x1="${a.x + a.w / 2}" y1="${a.y + a.h}" x2="${b.x + b.w / 2}" y2="${b.y - 3}" class="fl" marker-end="url(#ah)"/>`;
       }
-      const g = boxes.grid;
-      side.forEach((sb) => { const b = boxes[sb.key], y1 = g.y + g.h / 2, y2 = b.y + b.h / 2, m = (g.x + g.w + b.x) / 2;
-        s += `<path d="M${g.x + g.w},${y1} C${m},${y1} ${m},${y2} ${b.x - 4},${y2}" fill="none" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#ah)"/>`; });
-      // distribution -> devices: leave the right edge of the box, fan out in the gap
-      const db = boxes.dist, sx = db.x + db.w, sy = db.y + db.h / 2, mid = sx + (dx - sx) * 0.55;
-      devs.filter((x) => x.committed).forEach((x) => {
+      // grid -> baseload (solid) and grid -> each device that is not controlled (dashed);
+      // they bend early in the gap, the distribution arrows bend late, so they stay apart
+      const g = boxes.grid, gx = g.x + g.w, gy = g.y + g.h / 2, gm = gx + (dx - gx) * 0.35;
+      const feed = (b, dashed, kw) => {
+        const ty = b.y + b.h / 2;
+        s += `<path d="M${gx},${gy} C${gm},${gy} ${gm},${ty} ${b.x - 4},${ty}" fill="none" stroke="#94a3b8" stroke-width="${1.5 + Math.min(5, (kw || 0) * 1.2)}"${dashed ? ' stroke-dasharray="4 3"' : ""} marker-end="url(#ah)"/>`;
+        if (kw !== null && kw > 0.01) s += `<text x="${b.x - 8}" y="${ty - 6}" text-anchor="end" class="tx b">${pF(kw, 1)} kW</text>`;
+      };
+      feed(boxes.base, false, pN(f.baseload_kw));
+      devs0.forEach((x) => feed(boxes[x.entry_id], true, kwOf(x)));
+      // distribution -> controlled devices: leave the right edge of the box, fan out in the gap
+      const db = boxes.dist, sx = db.x + db.w, sy = db.y + db.h / 2, mid = sx + (dx - sx) * 0.65;
+      devs1.forEach((x) => {
         const b = boxes[x.entry_id], ty = b.y + b.h / 2, kw = pN(x.allocated_kw) ?? 0;
-        const st = PCP_STATUS[x.committed ? x.ui_status : "manual"] || PCP_STATUS.waiting;
-        const col = x.committed ? { ok: "var(--success-color)", info: "var(--info-color, var(--primary-color))", warn: "var(--warning-color)", bad: "var(--error-color)", mut: "var(--divider-color)" }[st[1]] : "var(--divider-color)";
-        s += `<path d="M${sx},${sy} C${mid},${sy} ${mid},${ty} ${b.x - 4},${ty}" fill="none" stroke="${col}" stroke-width="${1 + Math.min(8, kw * 1.4)}" ${kw > 0 && x.committed ? "" : 'stroke-dasharray="3 3"'} marker-end="url(#ah)" opacity=".9"/>`;
+        const st = PCP_STATUS[x.ui_status] || PCP_STATUS.waiting;
+        const col = { ok: "var(--success-color)", info: "var(--info-color, var(--primary-color))", warn: "var(--warning-color)", bad: "var(--error-color)", mut: "var(--divider-color)" }[st[1]];
+        s += `<path d="M${sx},${sy} C${mid},${sy} ${mid},${ty} ${b.x - 4},${ty}" fill="none" stroke="${col}" stroke-width="${1 + Math.min(8, kw * 1.4)}" ${kw > 0 ? "" : 'stroke-dasharray="3 3"'} marker-end="url(#ah)" opacity=".9"/>`;
         if (kw > 0) s += `<text x="${b.x - 8}" y="${ty - 6}" text-anchor="end" class="tx b">${pF(kw, 1)} kW</text>`;
       });
       // lending device -> device: arcs on the free right side of the device column
@@ -1356,19 +1469,32 @@ class PowerControllerPanel extends HTMLElement {
         s += `<text x="${bulge + 4}" y="${(y1 + y2) / 2 + 4}" class="tx b">lends ${pF(e.kw, 1)} kW</text>`;
       }
     } else {
-      const bw = W - 20; let y = 8;
-      chain.forEach((b) => { boxes[b.key] = { x: 10, y, w: bw, h: 78, ...b }; y += 78 + 22; if (b.key === "grid") { side.forEach((sb, j) => { boxes[sb.key] = { x: 10 + j * (bw / 2 + 4), y, w: bw / 2 - 4, h: 62, ...sb }; }); y += 62 + 22; } });
-      devs.forEach((x) => { boxes[x.entry_id] = { x: 40, y, w: bw - 64, h: 70 }; y += 70 + 14; });
+      // narrow: Grid, then (fed from the grid via the left rail) Baseload and the devices that are
+      // not controlled, then the limiter chain (its first arrow runs in the right gutter) and the
+      // controlled devices fed from Distribution.
+      const bw = W - 20, rail = 24, gut = W - 24, ix = 40, iw = bw - 64; let y = 8;
+      const chainY = {};
+      boxes.grid = { x: 10, y, w: bw, h: 78, ...chain[0] }; y += 78 + 18;
+      boxes.base = { x: ix, y, w: iw, h: 58, ...side[0] }; y += 58 + 12;
+      devs0.forEach((x) => { boxes[x.entry_id] = { x: ix, y, w: iw, h: 66 }; y += 66 + 12; });
+      y += 10;
+      chain.slice(1).forEach((b) => { boxes[b.key] = { x: 10, y, w: bw, h: 78, ...b }; chainY[b.key] = y; y += 78 + 22; });
+      devs1.forEach((x) => { boxes[x.entry_id] = { x: ix, y, w: iw, h: 70 }; y += 70 + 14; });
       H = y + 6;
-      for (let i = 0; i < chain.length - 1; i++) {
+      const g = boxes.grid, fed = [boxes.base, ...devs0.map((x) => boxes[x.entry_id])];
+      const lastFed = fed[fed.length - 1];
+      s += `<line x1="${rail}" y1="${g.y + g.h}" x2="${rail}" y2="${lastFed.y + lastFed.h / 2}" stroke="#94a3b8" stroke-width="1.5" stroke-dasharray="4 3"/>`;
+      fed.forEach((b, j) => { s += `<line x1="${rail}" y1="${b.y + b.h / 2}" x2="${b.x - 2}" y2="${b.y + b.h / 2}" stroke="#94a3b8" stroke-width="1.5"${j ? ' stroke-dasharray="4 3"' : ""} marker-end="url(#ah)"/>`; });
+      s += `<line x1="${gut}" y1="${g.y + g.h}" x2="${gut}" y2="${boxes.gl.y - 2}" class="fl" marker-end="url(#ah)"/>`;
+      for (let i = 1; i < chain.length - 1; i++) {
         const a = boxes[chain[i].key], b = boxes[chain[i + 1].key];
-        s += `<line x1="${a.x + a.w / 2}" y1="${a.y + a.h + (chain[i].key === "grid" ? 62 + 44 : 0)}" x2="${b.x + b.w / 2}" y2="${b.y - 2}" class="fl" marker-end="url(#ah)"/>`;
+        s += `<line x1="${a.x + a.w / 2}" y1="${a.y + a.h}" x2="${b.x + b.w / 2}" y2="${b.y - 2}" class="fl" marker-end="url(#ah)"/>`;
       }
       const db = boxes.dist;
-      if (devs.length) { const last = boxes[devs[devs.length - 1].entry_id]; s += `<line x1="24" y1="${db.y + db.h}" x2="24" y2="${last.y + last.h / 2}" class="fl"/>`; }
-      devs.forEach((x) => {
+      if (devs1.length) { const last = boxes[devs1[devs1.length - 1].entry_id]; s += `<line x1="${rail}" y1="${db.y + db.h}" x2="${rail}" y2="${last.y + last.h / 2}" class="fl"/>`; }
+      devs1.forEach((x) => {
         const b = boxes[x.entry_id], kw = pN(x.allocated_kw) ?? 0;
-        s += `<line x1="24" y1="${b.y + b.h / 2}" x2="${b.x - 2}" y2="${b.y + b.h / 2}" stroke="var(--secondary-text-color)" stroke-width="${1 + Math.min(6, kw)}" marker-end="url(#ah)"/>`;
+        s += `<line x1="${rail}" y1="${b.y + b.h / 2}" x2="${b.x - 2}" y2="${b.y + b.h / 2}" stroke="var(--secondary-text-color)" stroke-width="${1 + Math.min(6, kw)}" marker-end="url(#ah)"/>`;
       });
       for (const e of f.edges || []) {
         if (!e.from) continue;
@@ -1385,7 +1511,7 @@ class PowerControllerPanel extends HTMLElement {
     for (const b of [...chain, ...side]) bx += boxSvg(boxes[b.key], b.title, b.lines, b.c);
     devs.forEach((x) => {
       const b = boxes[x.entry_id], st = PCP_STATUS[x.committed ? x.ui_status : "manual"] || PCP_STATUS.waiting;
-      bx += boxSvg(b, x.name, [`${st[0]} · ${pLive(x)}`, x.committed ? `#${x.dist_priority}${pN(x.lent_kw) > 0 ? ` · lends ${pF(x.lent_kw, 1)} kW` : ""}` : "counted as load"], this._color(x.i));
+      bx += boxSvg(b, x.name, [`${st[0]} · ${pLive(x)}`, x.committed ? `#${x.dist_priority}${pN(x.lent_kw) > 0 ? ` · lends ${pF(x.lent_kw, 1)} kW` : ""}` : "from the grid · counted as load"], this._color(x.i));
     });
     svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("height", H);
     svg.innerHTML = `<defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="9" markerHeight="9" markerUnits="userSpaceOnUse" orient="auto-start-reverse"><path d="M0,0L10,5L0,10z" style="fill:var(--secondary-text-color)"/></marker>
@@ -1628,6 +1754,18 @@ class PowerControllerPanel extends HTMLElement {
     .aptab{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:6px}.aptab th{text-align:left;font-size:11px;text-transform:uppercase;color:var(--secondary-text-color);font-weight:600;padding:4px 6px}
     .aptab td{padding:5px 6px;border-top:1px solid var(--divider-color)}.aptab .num{text-align:right;font-variant-numeric:tabular-nums}.aptab .ab{width:24px;height:24px;font-size:11px}
     svg.hwp{display:block;width:100%;height:auto;margin-top:4px}
+    .aptab .pname{font:inherit;font-size:12.5px;color:var(--primary-text-color);background:var(--card-background-color);border:1px solid var(--divider-color);border-radius:7px;padding:3px 6px;width:100%;max-width:190px}
+    .aptab .pcode{display:block;font-size:10.5px;color:var(--secondary-text-color);font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere;margin-top:2px}
+    .tp.dirty{border-color:var(--warning-color)}
+    .tpn input{font:inherit;font-size:14.5px;font-weight:650;color:var(--primary-text-color);background:transparent;border:1px solid transparent;border-radius:8px;padding:3px 6px;max-width:220px}
+    .tpn input:hover,.tpn input:focus{border-color:var(--divider-color)}
+    .tpg{display:flex;flex-direction:column}
+    .tpl{font-size:12px;color:var(--secondary-text-color);margin:10px 0 6px}
+    .lnk{font:inherit;font-size:12px;background:none;border:0;padding:0;color:var(--primary-color);cursor:pointer;text-decoration:underline}
+    .chips2{display:flex;flex-wrap:wrap;gap:5px}
+    .chip3{font:inherit;font-size:12px;min-width:44px;min-height:32px;border-radius:999px;padding:4px 10px;cursor:pointer;border:1px solid var(--divider-color);background:transparent;color:var(--secondary-text-color)}
+    .chip3[aria-pressed=true]{background:color-mix(in srgb, var(--primary-color) 16%, transparent);border-color:var(--primary-color);color:var(--primary-text-color);font-weight:600}
+    .tps{margin-top:10px}.tpm{align-self:center}
     svg.zoomable{touch-action:pan-y;cursor:grab}svg.zoomable:active{cursor:grabbing}
     .zrs{position:absolute;bottom:10px;right:12px;z-index:3;font:inherit;font-size:11.5px;border-radius:8px;padding:4px 10px;border:1px solid var(--divider-color);background:var(--card-background-color);color:var(--primary-text-color);cursor:pointer}
     .card{position:relative}

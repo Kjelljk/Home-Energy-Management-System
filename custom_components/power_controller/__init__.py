@@ -116,6 +116,35 @@ def _register_websocket(hass: HomeAssistant) -> None:
         connection.send_result(msg["id"], coordinator.overview_payload())
 
     websocket_api.async_register_command(hass, ws_overview)
+
+    @websocket_api.require_admin
+    @websocket_api.websocket_command({
+        vol.Required("type"): "power_controller/tariff_period",
+        vol.Required("version_id"): str,
+        vol.Required("period_id"): str,
+        vol.Optional("name"): str,
+        vol.Optional("price"): vol.Coerce(float),
+        vol.Optional("days"): [str],
+        vol.Optional("start_hour"): vol.Coerce(int),
+        vol.Optional("end_hour"): vol.Coerce(int),
+        vol.Optional("months"): [vol.Coerce(int)],
+    })
+    @websocket_api.async_response
+    async def ws_tariff_period(hass: HomeAssistant, connection, msg: dict) -> None:
+        """Edit one grid-tariff period from the panel's Settings page (2.13.1)."""
+        coordinator = get_hub_coordinator(hass)
+        if coordinator is None:
+            connection.send_error(msg["id"], "not_loaded", "Power Controller hub is not loaded")
+            return
+        data = {k: msg[k] for k in ("name", "price", "days", "start_hour", "end_hour", "months") if k in msg}
+        try:
+            await coordinator.async_edit_tariff_period(msg["version_id"], msg["period_id"], data)
+        except ValueError as err:
+            connection.send_error(msg["id"], "invalid", str(err))
+            return
+        connection.send_result(msg["id"], coordinator.tariff_editor_payload())
+
+    websocket_api.async_register_command(hass, ws_tariff_period)
     hass.data[f"{DOMAIN}_ws"] = True
 
 
@@ -271,7 +300,7 @@ def _register_services(hass: HomeAssistant) -> None:
         try:
             await coordinator.async_appliance_program(call.data["device_id"], call.data["action"],
                                                       call.data.get("program"), call.data.get("kwh"),
-                                                      call.data.get("duration_h"))
+                                                      call.data.get("duration_h"), call.data.get("name"))
         except ValueError as err:
             raise ServiceValidationError(str(err)) from err
 
@@ -279,8 +308,9 @@ def _register_services(hass: HomeAssistant) -> None:
         DOMAIN, SERVICE_APPLIANCE_PROGRAM, handle_appliance_program,
         schema=vol.Schema({
             vol.Required("device_id"): cv.string,
-            vol.Required("action"): vol.In(["set", "delete", "reset"]),
+            vol.Required("action"): vol.In(["set", "name", "delete", "reset"]),
             vol.Optional("program"): cv.string,
+            vol.Optional("name"): vol.Any(cv.string, None),
             vol.Optional("kwh"): vol.All(vol.Coerce(float), vol.Range(min=0, max=50)),
             vol.Optional("duration_h"): vol.All(vol.Coerce(float), vol.Range(min=0.05, max=24)),
         }),

@@ -107,3 +107,45 @@ def plan_window(series: list[Any] | None, plan_start: datetime | None, now: date
     idx = plan_index(plan_start, now)
     out = list((series or [])[idx: idx + hours])
     return out + [None] * (hours - len(out))
+
+
+# ---------------------------------------------------------------------------
+# EV: does the connector status agree with what is measured? (2.13.1)
+# ---------------------------------------------------------------------------
+EV_CHECK_DELAY_S = 120          # a disagreement must last this long before it is shown
+EV_IDLE_KW = 0.2                # below this the car is not drawing power
+EV_DRAWING_KW = 0.5             # above this the car is clearly drawing power
+
+
+def ev_checks(status_raw: str | None, status_text: str | None, status_charging: bool | None,
+              power_kw: float | None, current_a: float | None, offered_a: float | None,
+              commanded_a: float | None, committed: bool, voltage: float = 230.0) -> dict[str, str]:
+    """Disagreements between the connector status and the measurements, {code: message}.
+
+    * status Charging, but the power (or current) sensor shows ~0
+    * status not Charging, but the power (or current) sensor shows the car drawing power
+    * power and current sensor disagree (P ≠ I × 230 V) – typically a sensor from another device
+    * the charger offers a different current than Power Controller set (command not accepted)
+    The caller shows a message only when it has lasted ``EV_CHECK_DELAY_S``.
+    """
+    out: dict[str, str] = {}
+    meas_kw = power_kw if power_kw is not None else (current_a * voltage / 1000.0 if current_a is not None else None)
+    src = "power sensor" if power_kw is not None else "charging-current sensor"
+    status = status_text or status_raw
+    if status_charging is True and meas_kw is not None and meas_kw < EV_IDLE_KW:
+        out["charging_no_power"] = (f"Status says “{status}”, but the {src} shows {meas_kw:.2f} kW. "
+                                    "Check that the sensor belongs to this charger.")
+    if status_charging is False and meas_kw is not None and meas_kw > EV_DRAWING_KW:
+        out["power_not_charging"] = (f"Status says “{status}”, but the {src} shows {meas_kw:.2f} kW. "
+                                     "Check the status sensor or the power sensor.")
+    if power_kw is not None and current_a is not None and max(power_kw, current_a * voltage / 1000.0) > EV_DRAWING_KW:
+        from_i = current_a * voltage / 1000.0
+        if abs(power_kw - from_i) > max(0.4, 0.35 * max(power_kw, from_i)):
+            out["power_current_mismatch"] = (f"Power {power_kw:.2f} kW does not match the charging current "
+                                             f"{current_a:.1f} A (≈ {from_i:.2f} kW at {voltage:.0f} V). "
+                                             "One of the sensors may belong to another device.")
+    if (committed and status_charging is True and offered_a is not None and commanded_a is not None
+            and abs(offered_a - commanded_a) > 1.5):
+        out["offered_not_commanded"] = (f"The charger offers {offered_a:.0f} A, but Power Controller set "
+                                        f"{commanded_a:.0f} A. The command may not have been accepted.")
+    return out

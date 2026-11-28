@@ -283,3 +283,63 @@ def steps_from_text(text: str) -> list[CapacityStep]:
     if not steps:
         raise ValueError("empty")
     return steps
+
+
+# ---------------------------------------------------------------------------
+# Editing one period from the panel's Settings page (2.13.1)
+# ---------------------------------------------------------------------------
+PERIOD_EDIT_ERRORS: dict[str, str] = {
+    "unknown_version": "The price list version no longer exists – reload the page.",
+    "unknown_period": "The period no longer exists – reload the page.",
+    "no_days": "Choose at least one day.",
+    "invalid_hours": "From hour must be 0–23 and to hour 0–24.",
+    "invalid_months": "Months must be 1–12.",
+    "invalid_price": "The price must be between 0 and 10 NOK/kWh.",
+    "empty_name": "The period needs a name.",
+}
+
+
+def edit_period(schedule: GridTariffSchedule, version_id: str, period_id: str, data: dict) -> list[str]:
+    """Validate and apply an edit of one period: name, price, days, start/end hour and months.
+    Keys that are missing in ``data`` are left unchanged. Returns error codes (nothing is
+    changed when there is an error)."""
+    version = schedule.get(version_id)
+    if version is None:
+        return ["unknown_version"]
+    period = next((p for p in version.periods if p.id == period_id), None)
+    if period is None:
+        return ["unknown_period"]
+    errors: list[str] = []
+    name = str(data.get("name", period.name)).strip()
+    if not name:
+        errors.append("empty_name")
+    try:
+        price = float(data.get("price", period.price))
+        if not 0.0 <= price <= 10.0:
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("invalid_price")
+        price = period.price
+    days = [d for d in DAY_KEYS if d in (data.get("days", period.days) or [])]
+    if not days or any(d not in DAY_KEYS for d in (data.get("days", period.days) or [])):
+        errors.append("no_days")
+    try:
+        start, end = int(data.get("start_hour", period.start_hour)), int(data.get("end_hour", period.end_hour))
+        if not (0 <= start <= 23 and 0 <= end <= 24):
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("invalid_hours")
+        start, end = period.start_hour, period.end_hour
+    try:
+        months = sorted({int(m) for m in (data.get("months", period.months) or [])})
+        if any(not 1 <= m <= 12 for m in months):
+            raise ValueError
+    except (TypeError, ValueError):
+        errors.append("invalid_months")
+        months = period.months
+    if errors:
+        return sorted(set(errors))
+    period.name, period.price, period.days = name[:40], round(price, 5), days
+    period.start_hour, period.end_hour = start, end
+    period.months = [] if len(months) == 12 else months   # all twelve = all year
+    return []

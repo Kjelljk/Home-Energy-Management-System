@@ -123,9 +123,9 @@ from .actuation import (
     parse_transaction_id,
     should_send_command,
 )
-from .grid_tariff import GridTariffSchedule
+from .grid_tariff import PERIOD_EDIT_ERRORS, GridTariffSchedule, edit_period
 from .price_engine import EnergyPriceEngine, PriceSeries72h, build_workday_mask, is_norwegian_workday
-from .card_model import next_action, plan_index, plan_window, ui_status, value_at
+from .card_model import EV_CHECK_DELAY_S, ev_checks, next_action, plan_index, plan_window, ui_status, value_at
 from .energy_meter import ClosedHour, HourEnergyTracker, max_hour_kwh_for_fuse, rebuild_month
 from .notifier import ACTION_IGNORE, ACTION_PRIORITY_NOW, NotifySettings, Notifier, parse_hhmm
 from .occupancy import OCC_SELECT_OPTIONS, OccupancyProfile, apply_selector, effective_state
@@ -239,6 +239,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.ev_session_start: dict[str, datetime | None] = {}
         self.ev_min_since: dict[str, datetime | None] = {}
         self._ev_was_connected: dict[str, bool] = {}
+        # status vs. measurement disagreements per EV (shown on the card after EV_CHECK_DELAY_S)
+        self.ev_warnings: dict[str, dict[str, str]] = {}
+        self._ev_check_since: dict[str, dict[str, datetime]] = {}
         self._entity_cache: dict[tuple[str, str], str | None] = {}
 
         # trackers
@@ -412,6 +415,30 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.register_subentry(entry)
         self._entity_cache.clear()
         await self.async_settings_changed(reprice=False)
+
+    async def async_edit_tariff_period(self, version_id: str, period_id: str, data: dict) -> None:
+        """Edit name, price, days, hours and months of one grid-tariff period from the panel's
+        Settings page (2.13.1). No reload: the period keeps its id, so its price entity stays."""
+        errors = edit_period(self.price_engine.grid_tariff, version_id, period_id, data)
+        if errors:
+            raise ValueError(" ".join(PERIOD_EDIT_ERRORS.get(e, e) for e in errors))
+        await self.async_settings_changed()
+
+    def tariff_editor_payload(self) -> dict[str, Any]:
+        """All price-list versions with their periods (for the Settings page editor)."""
+        today = dt_util.now().date()
+        active = self.price_engine.tariff_version(today)
+        return {
+            "active_id": active.id,
+            "versions": [{
+                "id": v.id, "name": v.name, "valid_from": v.valid_from, "prices_include_vat": v.prices_include_vat,
+                "default_price": v.default_price, "energy_fee": v.energy_fee,
+                "periods": [{"id": p.id, "name": p.name, "price": p.price, "days": list(p.days),
+                             "start_hour": int(p.start_hour), "end_hour": int(p.end_hour), "months": list(p.months),
+                             "entity": self.own_entity_id("number", f"{self.hub_entry.entry_id}_grid_period_{p.id}")}
+                            for p in v.periods],
+            } for v in self.price_engine.grid_tariff.versions],
+        }
 
     async def async_apply_grid_tariff(self, schedule: GridTariffSchedule) -> None:
         """Called by the options flow: store the edited tariff and reload the hub so that
@@ -1503,6 +1530,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._update_day_counters(dt_s)
         self._update_mode_transitions(now)
         self._track_ev_sessions(now)
+        self._update_ev_checks(now)
         self._update_appliances(now)
 
         dist_inputs = []
@@ -1565,6 +1593,29 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 self.ev_min_since[eid] = None
                 self.schedule_save()
             self._ev_was_connected[eid] = connected
+
+    def _update_ev_checks(self, now: datetime) -> None:
+        """Connector status vs. measurements (2.13.1). A disagreement is reported only when it has
+        lasted EV_CHECK_DELAY_S, so the ramp-up after a start does not trigger it."""
+        for eid in self.device_entries:
+            d = self.device_cfg(eid)
+            if d.get(CONF_DEVICE_TYPE) != DeviceType.EV_CHARGER:
+                continue
+            raw, text = self.ev_status(d)
+            info = EV_STATUS_TEXT.get(raw.replace(" ", "").replace("_", "").lower()) if raw else None
+            found = ev_checks(raw, text, info[1] if info else None,
+                              self._read_float(d.get(CONF_POWER_SENSOR)), self._read_float(d.get(CONF_EV_CURRENT_SENSOR)),
+                              self._read_float(d.get(CONF_EV_OFFERED_SENSOR)),
+                              self._last_ev_target_a.get(eid) if self.committed.get(eid) else None,
+                              bool(self.committed.get(eid)))
+            since = self._ev_check_since.setdefault(eid, {})
+            for code in list(since):
+                if code not in found:
+                    since.pop(code)
+            for code in found:
+                since.setdefault(code, now)
+            self.ev_warnings[eid] = {c: m for c, m in found.items()
+                                     if (now - since[c]).total_seconds() >= EV_CHECK_DELAY_S}
 
     def _update_mode_transitions(self, now: datetime) -> None:
         """Away -> Arriving (pre-heat started) -> Home (arrival time reached)."""
@@ -1794,7 +1845,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             progress = float(pr.state) if pr else None
         except ValueError:
             progress = None
-        return {"state": raw, "state_class": cls, "program": program, "start_at": start_at,
+        return {"state": raw, "state_class": cls, "program": program,
+                "program_name": model.label(program) if model else program, "start_at": start_at,
                 "finish_at": finish_at, "remaining_h": remaining_h, "progress": progress, "roles": r,
                 "expected_kwh": round(stats.kwh, 3) if stats else None,
                 "expected_duration_h": round(stats.duration_h, 3) if stats else None,
@@ -1836,15 +1888,25 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self.hass.async_create_task(self.async_run_planner())
 
     async def async_appliance_program(self, device_id: str, action: str, program: str | None = None,
-                                      kwh: float | None = None, duration_h: float | None = None) -> None:
-        """set | delete | reset (all) for an appliance's program register."""
+                                      kwh: float | None = None, duration_h: float | None = None,
+                                      name: str | None = None) -> None:
+        """set | name | delete | reset (all) for an appliance's program register.
+        ``name`` gives the program its own display name (e.g. the code "22" -> "Bomull 40")."""
         model = self.appliances.get(device_id)
         if model is None:
             raise ValueError(f"{device_id} is not a household appliance")
         if action == "set":
             if not program:
                 raise ValueError("program is required")
-            model.set_manual(program, kwh, duration_h)
+            if kwh is not None or duration_h is not None:
+                model.set_manual(program, kwh, duration_h)
+            if name is not None:
+                model.set_name(program, name)
+        elif action == "name":
+            model.set_name(program or "", name)
+            self.schedule_save()
+            await self.async_request_refresh()
+            return
         elif action == "delete":
             model.programs.pop(program or "", None)
         elif action == "reset":
@@ -1865,6 +1927,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             out.append({"device_id": eid, "name": self.device_entries[eid].title,
                         "has_power_sensor": bool(self.device_cfg(eid).get(CONF_POWER_SENSOR)),
                         "state": s_["state"], "state_class": s_["state_class"], "program": s_["program"],
+                        "program_name": s_["program_name"],
                         "roles": s_["roles"], **(m.summary() if m else {})})
         return out
 
@@ -2250,7 +2313,10 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             connector_status=d.get(CONF_EV_STATUS_SENSOR),
                             offered_current=d.get(CONF_EV_OFFERED_SENSOR),
                             session_energy=d.get(CONF_EV_SESSION_ENERGY_SENSOR),
-                            charging_current=d.get(CONF_EV_CURRENT_SENSOR))
+                            charging_current=d.get(CONF_EV_CURRENT_SENSOR),
+                            charge_switch=d.get(CONF_EV_CHARGE_SWITCH),
+                            transaction=d.get(CONF_EV_TRANSACTION_SENSOR),
+                            availability_switch=d.get(CONF_EV_AVAILABILITY_SWITCH))
             extra = {"soc": cfg_value(CONF_EV_SOC_SENSOR), "target_soc": self.ev_target_soc(eid),
                      "target_soc_source": "car" if d.get(CONF_EV_TARGET_SOC_ENTITY) else "power_controller",
                      "transaction_id": self.ev_transaction_id(d),
@@ -2273,13 +2339,15 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                      "session_energy_kwh": cfg_value(CONF_EV_SESSION_ENERGY_SENSOR),
                      "car_current_limit_a": cfg_value(CONF_EV_CAR_LIMIT_ENTITY),
                      "max_current_a": self.ev_max_current_a(d),
+                     "ev_warnings": list(self.ev_warnings.get(eid, {}).values()),
                      "commanded_current_a": self._last_ev_target_a.get(eid)}
         elif dtype == DeviceType.APPLIANCE:
             s_ = self.appliance_status(eid, now)
             entities.update(committed=None, priority_now=None, **{f"appl_{k}": v for k, v in s_["roles"].items()})
             iso = lambda v: v.isoformat() if v else None  # noqa: E731
             extra = {"appliance_state": s_["state"], "appliance_state_class": s_["state_class"],
-                     "program": s_["program"], "start_at": iso(s_["start_at"]), "finish_at": iso(s_["finish_at"]),
+                     "program": s_["program"], "program_name": s_["program_name"],
+                     "start_at": iso(s_["start_at"]), "finish_at": iso(s_["finish_at"]),
                      "remaining_h": s_["remaining_h"], "progress": s_["progress"],
                      "expected_kwh": s_["expected_kwh"], "expected_duration_h": s_["expected_duration_h"],
                      "program_learned": s_["learned"], "expected_source": s_["source"],
@@ -2548,6 +2616,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "thermal_zones": self.thermal_zones_payload(),
             "hotwater_models": self.hotwater_models_payload(),
             "appliances": self.appliances_payload(),
+            "tariff_editor": self.tariff_editor_payload(),
             "kpi": {
                 "grid_power_kw": round(self.grid_power_kw, 3),
                 "limit_now_kw": self.limit_now_kw,

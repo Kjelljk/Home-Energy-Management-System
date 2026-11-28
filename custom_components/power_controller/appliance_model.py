@@ -131,6 +131,27 @@ def detect_roles(entities: list[tuple[str, str]]) -> dict[str, str]:
     return out
 
 
+_CAMEL = re.compile(r"(?<=[a-zæøå])(?=[A-ZÆØÅ])|(?<=[A-Za-zÆØÅæøå])(?=\d)|(?<=\d)(?=[A-Za-zÆØÅæøå]{2})")
+
+
+def pretty_program(code: str | None) -> str | None:
+    """Readable default name for a program key: 'Dishcare.Dishwasher.Program.Eco50' -> 'Eco 50',
+    'LaundryCare.Washer.Program.Cotton' -> 'Cotton', 'quick_wash' -> 'Quick wash'. Plain numeric
+    codes ('22') stay as they are – give them a name in the register."""
+    if code is None:
+        return None
+    s = str(code).strip()
+    if not s or re.fullmatch(r"[\d.,]+", s):
+        return s
+    if "." in s and " " not in s:
+        segs = [x for x in s.split(".") if x]
+        if segs:
+            s = f"{segs[-2]} {segs[-1]}" if segs[-1].isdigit() and len(segs) > 1 else segs[-1]
+    s = _CAMEL.sub(" ", s.replace("_", " "))
+    s = re.sub(r"\s+", " ", s).strip()
+    return s[:1].upper() + s[1:] if s else str(code)
+
+
 @dataclass
 class ProgramStats:
     runs: int = 0
@@ -180,6 +201,24 @@ class ApplianceModel:
     last_ts: str | None = None
     last_kw: float = 0.0
     last_state: str = "idle"
+    names: dict[str, str] = field(default_factory=dict)       # program key -> own display name
+
+    # ------------------------------------------------------------------ names
+    def label(self, program: str | None) -> str | None:
+        """Display name: the owner's own name for the program, else a readable version of the key."""
+        if program is None:
+            return None
+        return self.names.get(program) or pretty_program(program)
+
+    def set_name(self, program: str, name: str | None) -> None:
+        """Give a program (e.g. the code '22') its own name ('Bomull 40'). Empty = remove."""
+        if not program:
+            raise ValueError("program is required")
+        name = str(name or "").strip()
+        if name:
+            self.names[program] = name[:60]
+        else:
+            self.names.pop(program, None)
 
     # ------------------------------------------------------------------ register
     def stats(self, program: str | None) -> ProgramStats:
@@ -298,7 +337,8 @@ class ApplianceModel:
         return {"device_id": self.device_id, "default_kwh": self.default_kwh, "default_duration_h": self.default_duration_h,
                 "programs": {k: v.to_dict() for k, v in self.programs.items()},
                 "run_program": self.run_program, "run_start": self.run_start, "run_buckets": self.run_buckets,
-                "last_ts": self.last_ts, "last_kw": self.last_kw, "last_state": self.last_state}
+                "last_ts": self.last_ts, "last_kw": self.last_kw, "last_state": self.last_state,
+                "names": dict(self.names)}
 
     @classmethod
     def from_dict(cls, d: dict) -> ApplianceModel:
@@ -309,13 +349,16 @@ class ApplianceModel:
         m.run_program, m.run_start = d.get("run_program"), d.get("run_start")
         m.run_buckets = list(d.get("run_buckets") or [])
         m.last_ts, m.last_kw, m.last_state = d.get("last_ts"), float(d.get("last_kw") or 0.0), d.get("last_state", "idle")
+        m.names = {str(k): str(v) for k, v in (d.get("names") or {}).items() if v}
         return m
 
     def summary(self) -> dict:
         rows = []
         for name, st in sorted(self.programs.items(), key=lambda kv: -kv[1].runs):
-            rows.append({"program": name, **st.to_dict(),
+            rows.append({"program": name, "name": self.label(name), "named": name in self.names, **st.to_dict(),
                          "avg_kw": round(st.kwh / st.duration_h, 3) if st.duration_h else None})
         return {"programs": rows, "default_kwh": self.default_kwh, "default_duration_h": self.default_duration_h,
                 "running": self.run_start is not None, "run_program": self.run_program,
+                "run_program_name": self.label(self.run_program),
+                "names": dict(self.names),
                 "run_kwh_so_far": round(sum(self.run_buckets), 3), "run_start": self.run_start}

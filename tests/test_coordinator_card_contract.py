@@ -450,3 +450,54 @@ def test_appliance_device_end_to_end(coordinator):
     p = coordinator.overview_payload()
     row = next(x for x in p["appliances"] if x["device_id"] == "DW")
     assert row["programs"][0]["program"] == "Super 60°C" and row["programs"][0]["runs"] == 1
+
+
+def test_v2131_ev_warning_after_delay_sensors_and_appliance_names_and_tariff_edit(coordinator):
+    """2.13.1 end-to-end on the coordinator: EV status/measurement warning only after 2 minutes,
+    configured sensors in the card contract, appliance program names, grid-tariff period edit."""
+    import asyncio
+    from custom_components.power_controller.const import DeviceType
+
+    class _St:
+        def __init__(self, s, unit=""):
+            self.state, self.attributes, self.last_updated = str(s), {"unit_of_measurement": unit}, NOW
+    st = {"sensor.status": _St("Charging"), "sensor.ev_power": _St(0, "W"), "switch.charge": _St("on"),
+          "sensor.tx": _St("77")}
+    old_get = coordinator.hass.states.get
+    coordinator.hass.states = type("S", (), {"get": staticmethod(lambda e: st.get(e) or old_get(e))})()
+    coordinator.device_entries["EV"].data.update(ev_status_sensor="sensor.status", power_sensor="sensor.ev_power",
+                                                 ev_charge_switch="switch.charge", ev_transaction_sensor="sensor.tx")
+    coordinator._update_ev_checks(NOW)
+    assert coordinator.device_attributes("EV")["ev_warnings"] == []          # not yet: may be ramping up
+    coordinator._update_ev_checks(NOW + timedelta(seconds=130))
+    a = coordinator.device_attributes("EV")
+    assert len(a["ev_warnings"]) == 1 and "Charging" in a["ev_warnings"][0]
+    assert a["entities"]["charge_switch"] == "switch.charge" and a["entities"]["transaction"] == "sensor.tx"
+    st["sensor.ev_power"] = _St(7200, "W")
+    coordinator._update_ev_checks(NOW + timedelta(seconds=140))
+    assert coordinator.device_attributes("EV")["ev_warnings"] == []          # resolved -> gone at once
+
+    async def _noop(*a, **k):
+        return None
+    coordinator.async_run_planner = _noop
+    coordinator.async_run_price_update = _noop
+    coordinator.async_request_refresh = _noop
+    coordinator.schedule_save = lambda: None
+    st.update({"sensor.wm_state": _St("Run"), "sensor.wm_prog": _St("22")})
+    coordinator.register_subentry(_Entry("WM", "Washer", {
+        "entry_type": "device", "device_type": DeviceType.APPLIANCE, "phase_pair": "L1-L2", "nominal_power_kw": 2.0,
+        "appl_operation_state": "sensor.wm_state", "appl_active_program": "sensor.wm_prog"}))
+    assert coordinator.device_attributes("WM")["program_name"] == "22"
+    asyncio.run(coordinator.async_appliance_program("WM", "name", "22", name="Bomull 40"))
+    assert coordinator.device_attributes("WM")["program_name"] == "Bomull 40"
+    row = next(x for x in coordinator.overview_payload()["appliances"] if x["device_id"] == "WM")
+    assert row["program_name"] == "Bomull 40" and row["names"] == {"22": "Bomull 40"}
+
+    te = coordinator.overview_payload()["tariff_editor"]
+    v = next(x for x in te["versions"] if x["id"] == te["active_id"])
+    pid = v["periods"][0]["id"]
+    asyncio.run(coordinator.async_edit_tariff_period(v["id"], pid, {"start_hour": 7, "end_hour": 21, "months": [11, 12]}))
+    p2 = coordinator.tariff_editor_payload()["versions"][0]["periods"][0]
+    assert (p2["start_hour"], p2["end_hour"], p2["months"]) == (7, 21, [11, 12])
+    with pytest.raises(ValueError, match="at least one day"):
+        asyncio.run(coordinator.async_edit_tariff_period(v["id"], pid, {"days": []}))

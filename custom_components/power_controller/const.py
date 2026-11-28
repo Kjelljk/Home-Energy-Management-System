@@ -12,7 +12,7 @@ except ImportError:
 
 DOMAIN = "power_controller"
 
-VERSION = "2.13.0"  # keep in sync with manifest.json (used for frontend cache busting)
+VERSION = "2.13.1"  # keep in sync with manifest.json (used for frontend cache busting)
 
 
 PLATFORMS: list[str] = [

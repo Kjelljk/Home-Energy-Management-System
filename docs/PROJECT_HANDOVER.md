@@ -4,8 +4,8 @@
 without the earlier conversation. Read this first, then `README.md` (features) and
 `CHANGELOG.md` (per version).
 
-**Current version:** 2.13.0. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
-- Pure-Python engines: unit-tested (123 tests pass, ~5 s).
+**Current version:** 2.13.1. **Repository:** https://github.com/Kjelljk/Home-Energy-Management-System (public). **Status:**
+- Pure-Python engines: unit-tested (128 tests pass, ~7 s).
 - HA layer: syntax/undefined-name checked; options flow and the card contract/panel feed are
   exercised with HA stubs. **Never run in a real Home Assistant instance yet.**
 - Frontend JS: exercised in Chromium with a mock `hass` (all buttons/steppers/selects, panel tabs,
@@ -26,7 +26,7 @@ without the earlier conversation. Read this first, then `README.md` (features) a
 1. v1 spec by the owner → Gemini v2.1 spec + first code (MILP, untested, many critical bugs).
 2. 2.2 rewrite (LP planner, editable grid tariff, persistence, robustness) → 2.3 overload
    acceptance + English only → 2.4 shadow evaluation (Norgespris vs. spot) → 2.5 occupancy and
-   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts → 2.10.0 partial lending, calmer heat pump (30 min, PI hysteresis, hourly setpoints), thermal-model view/reset/manual, help texts, priority-stacked plan → 2.10.1/2.10.2 OCPP TxProfile on the active transaction, EV start sequence fix (never below min current), car target SoC entity → 2.11.0 hourly energy rewrite (integrated grid power / hourly sensor, close-on-detect, month rebuilt from recorder statistics), no reload on config changes, notifications, EV delay only beyond 24 h → 2.11.1 plausibility check of statistics hours (fuse limit, spread over gaps, own measured hours trusted) so lumped hours cannot lock a high capacity step → 2.12.0 fixed tariff selector (in-use step internal), safe mode latched to end of hour, learning hot-water model, EV connector status / car current limiter, zoomable charts, dashboard layout fixes → 2.12.1 freshness via last_reported, no staleness gate on device power sensors, power_source labels, live values from HA states in card/panel, collapsible EV details, masonry Devices page → 2.13.0 start-up grace for safe mode (latch only after a real outage), read-only household appliance type with Home Connect auto-detection and a per-program energy register.
+   home office → 2.6 object card, overview panel, plan-index bug fix → 2.6.1 hassfest/HACS fixes and brand icon → (2.7.0 = owner's own upload) → 2.8.0 uncommitted devices in the plan, occupancy selector, Norgespris remaining, panel split per module with live flow and history, optional-field fix → 2.9.0 15-minute planning, command patience, EV no-deadline + minimum SoC, heater type, Settings page, full-screen charts → 2.10.0 partial lending, calmer heat pump (30 min, PI hysteresis, hourly setpoints), thermal-model view/reset/manual, help texts, priority-stacked plan → 2.10.1/2.10.2 OCPP TxProfile on the active transaction, EV start sequence fix (never below min current), car target SoC entity → 2.11.0 hourly energy rewrite (integrated grid power / hourly sensor, close-on-detect, month rebuilt from recorder statistics), no reload on config changes, notifications, EV delay only beyond 24 h → 2.11.1 plausibility check of statistics hours (fuse limit, spread over gaps, own measured hours trusted) so lumped hours cannot lock a high capacity step → 2.12.0 fixed tariff selector (in-use step internal), safe mode latched to end of hour, learning hot-water model, EV connector status / car current limiter, zoomable charts, dashboard layout fixes → 2.12.1 freshness via last_reported, no staleness gate on device power sensors, power_source labels, live values from HA states in card/panel, collapsible EV details, masonry Devices page → 2.13.0 start-up grace for safe mode (latch only after a real outage), read-only household appliance type with Home Connect auto-detection and a per-program energy register → 2.13.1 live flow: not-controlled devices under Baseload fed from Grid, collapsible appliance card, EV status/measurement warnings + configured-sensor overview, grid-tariff period editor on the Settings page (websocket power_controller/tariff_period), readable/own program names.
 
 ---
 
@@ -141,7 +141,7 @@ real-time loop); `plans_72h` / `plan_result` are the hourly view for UI, history
 ## 5. Development workflow
 ```bash
 pip install pytest numpy scipy
-pytest -q                     # 66 tests
+pytest -q                     # 128 tests
 node --check custom_components/power_controller/www/*.js
 ```
 - HA-stub tests (`test_options_flow_tariff.py`, `test_coordinator_card_contract.py`) skip when real

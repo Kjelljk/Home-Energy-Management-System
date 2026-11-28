@@ -98,9 +98,9 @@ One page per module so it is clear what each part does:
 | **Overview** | *Now & history*: KPIs, power per device last hour, phase currents/voltages last 24 h, consumption 3 days back / 3 days ahead · *Plan*: next 24 h and the device list |
 | **Price** | price split (energy/grid), 72 h price, Norgespris volume and projection, grid tariff, Norgespris vs. spot |
 | **Plan** | 72 h plan (incl. forecast for uncommitted devices), occupancy selector and 7-day schedule, plan vs. actual |
-| **Distribution** | live flow grid → limiters → distribution → devices, incl. lending arrows, phases and the decision per device |
+| **Distribution** | live flow grid → limiters → distribution → devices (baseload and devices that are not controlled are fed straight from the grid, at the top of the right half), incl. lending arrows, phases and the decision per device |
 | **Devices / Priorities** | object cards and drag-and-drop priority order |
-| **Settings** | the values you change often, each with a "?" explanation; **thermal models** per zone (what has been learned, manual adjustment, reset) |
+| **Settings** | the values you change often, each with a "?" explanation; **grid tariff periods** (hours, days, months, price); **thermal models** per zone (what has been learned, manual adjustment, reset); hot-water models; appliance program registers (with your own program names) |
 
 History comes from the Home Assistant recorder (no extra storage). Plan vs. actual keeps 7 days.
 Every chart has a full-screen button.
