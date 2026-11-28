@@ -132,7 +132,7 @@ hotwater_model:
 
 appliance_program:
   name: Appliance Program Register
-  description: Set the energy and duration of an appliance program manually, delete one program, or reset the whole register.
+  description: Set the energy and duration of an appliance program manually, give a program its own name (e.g. the code "22" -> "Cotton 40"), delete one program, or reset the whole register.
   fields:
     device_id:
       name: Device ID
@@ -145,10 +145,15 @@ appliance_program:
       required: true
       selector:
         select:
-          options: ["set", "delete", "reset"]
+          options: ["set", "name", "delete", "reset"]
     program:
       name: Program
-      description: Program name as reported by the appliance (e.g. "Eco 50°C").
+      description: Program key as reported by the appliance (e.g. "Eco 50°C" or "22").
+      selector:
+        text:
+    name:
+      name: Display name
+      description: Your own name for the program (actions "name" and "set"). Empty removes it.
       selector:
         text:
     kwh:

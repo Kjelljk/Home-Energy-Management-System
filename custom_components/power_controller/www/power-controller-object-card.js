@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.13.0";
+const PC_CARD_VERSION = "2.13.1";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -196,7 +196,7 @@ class PowerControllerObjectCard extends HTMLElement {
       return `${a.connector_status_text ? `${a.connector_status_text} · ` : ""}${soc === null ? "–" : soc.toFixed(0)} % · target ${pcNum(this._val("target_soc", a.target_soc)) ?? "–"} %${fin ? ` by ${fin}` : " · no deadline"}${a.connected === false && !a.connector_status_text ? " · unplugged" : ""}`;
     }
     if (t === "appliance") {
-      const p = a.program ? ` · ${a.program}` : "";
+      const p = a.program ? ` · ${a.program_name || a.program}` : "";
       if (a.appliance_state_class === "delayed" && a.start_at) return `Starts ${this._when(a.start_at)}${p}`;
       if (a.appliance_state_class === "running") return `Running${p}${a.finish_at ? ` · done ${pcHHMM(new Date(a.finish_at))}` : ""}`;
       return `${PC_APPL_STATE[a.appliance_state_class] || "–"}${a.appliance_state ? ` (${a.appliance_state})` : ""}`;
@@ -236,7 +236,7 @@ class PowerControllerObjectCard extends HTMLElement {
       : (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw" title="Power now (${this._srcText(L.src)}) / power granted by the distribution">${live.toFixed(2)}${est ? "*" : ""} / ${alloc.toFixed(1)} kW</span>`;
     const meter = key === "manual" || alloc <= 0 ? "" :
       `<div class="meter"><i style="width:${Math.min(100, (alloc / nom) * 100)}%;background:color-mix(in srgb, ${st.color} 30%, transparent)"></i><i style="width:${Math.min(100, (live / nom) * 100)}%;background:${st.color}"></i></div>`;
-    const detail = a.device_type === "appliance" ? pcEsc(a.program || "") : this._distDetail({ ...a, ui_status: key });
+    const detail = a.device_type === "appliance" ? pcEsc(a.program_name || a.program || "") : this._distDetail({ ...a, ui_status: key });
     return `<div style="--s:${st.color}"><div class="dist${st.pulse ? " pulse" : ""}" role="status"><span class="d"></span><b>${st.label}</b><span class="dt">${detail}</span>${kw}</div>${meter}</div>`;
   }
 
@@ -330,6 +330,37 @@ class PowerControllerObjectCard extends HTMLElement {
     return `<div class="gv evi">${rows.map(([k, val]) => `<span>${pcEsc(k)}</span><b>${pcEsc(val)}</b>`).join("")}</div>`;
   }
 
+  /* disagreement between connector status and measurements (from the coordinator, shown after 2 min) */
+  _evWarnHtml(a) {
+    const w = Array.isArray(a.ev_warnings) ? a.ev_warnings : [];
+    if (!w.length) return "";
+    return `<div class="evwarn" role="alert"><ha-icon icon="mdi:alert-outline"></ha-icon><div>${w.map((m) => `<div>${pcEsc(m)}</div>`).join("")}</div></div>`;
+  }
+
+  /* the sensors chosen in the configuration, with their current values (live from HA) */
+  _evSensors(a) {
+    const e = this._ents();
+    const list = [["Connector status", e.connector_status], ["Power", e.power], ["Charging current", e.charging_current],
+      ["Current offered to car", e.offered_current], ["Energy this session", e.session_energy], ["Battery SoC", e.soc],
+      ["Car's target SoC", a.target_soc_source === "car" ? e.target_soc : null], ["Car current limit", e.car_current_limit],
+      ["Plugged in", e.connected], ["Charge switch", e.charge_switch], ["Transaction ID", e.transaction],
+      ["Availability switch", e.availability_switch]].filter(([, id]) => id);
+    if (!list.length) return "";
+    const fmt = (st) => {
+      if (!st) return ["not found", true];
+      if (["unavailable", "unknown"].includes(st.state)) return [st.state, true];
+      if (this._hass.formatEntityState) return [this._hass.formatEntityState(st), false];
+      const u = st.attributes?.unit_of_measurement;
+      return [`${st.state}${u ? ` ${u}` : ""}`, false];
+    };
+    const rows = list.map(([lbl, id]) => {
+      const [val, bad] = fmt(this._hass.states[id]);
+      return `<button type="button" class="sens" data-act="moreid" data-id="${pcEsc(id)}" title="Open ${pcEsc(id)}">
+        <span>${pcEsc(lbl)}<small>${pcEsc(id)}</small></span><b class="${bad ? "bad" : ""}">${pcEsc(val)}</b></button>`;
+    }).join("");
+    return `<div class="sensh">Sensors in the configuration · value now</div><div class="sensl">${rows}</div>`;
+  }
+
   _detailsOpen() { try { return localStorage.getItem(`pc-card-details:${this._config.entity}`) === "1"; } catch (_) { return false; } }
 
   _when(iso) {
@@ -341,20 +372,30 @@ class PowerControllerObjectCard extends HTMLElement {
   _applianceBody(a) {
     const rows = [];
     const cls = a.appliance_state_class;
+    const pname = a.program_name || a.program;
     rows.push(["State", `${PC_APPL_STATE[cls] || "–"}${a.appliance_state ? ` (${a.appliance_state})` : ""}`]);
-    if (a.program) rows.push(["Program", a.program]);
+    if (a.program) rows.push(["Program", pname !== a.program ? `${pname} (${a.program})` : pname]);
     if (cls === "delayed" && a.start_at) rows.push(["Starts", this._when(a.start_at)]);
     if (a.finish_at && cls !== "idle") rows.push(["Finished", this._when(a.finish_at)]);
     if (pcNum(a.progress) !== null && cls === "running") rows.push(["Progress", `${pcNum(a.progress).toFixed(0)} %`]);
-    if (pcNum(a.expected_kwh) !== null && cls !== "idle") rows.push([`Expected (${a.expected_source || (a.program_learned ? "learned" : "default")})`,
+    const exp = pcNum(a.expected_kwh) !== null && cls !== "idle";
+    if (exp) rows.push([`Expected (${a.expected_source || (a.program_learned ? "learned" : "default")})`,
       `${pcNum(a.expected_kwh).toFixed(2)} kWh · ${pcNum(a.expected_duration_h).toFixed(1)} h`]);
     const L = this._live(a);
     rows.push([`Power (${this._srcText(L.src)})`, `${L.kw.toFixed(2)} kW`]);
     rows.push(["Programs in register", String(a.programs_known ?? 0)]);
     const prog = cls === "running" && pcNum(a.progress) !== null
-      ? `<div class="socb"><i style="width:${Math.min(100, pcNum(a.progress))}%"></i></div>` : "";
-    return `${this._stripHtml(a)}${prog}<div class="gv evi" style="margin-top:10px">${rows.map(([k, v]) => `<span>${pcEsc(k)}</span><b>${pcEsc(v)}</b>`).join("")}</div>
-      <div class="hint" style="margin-top:6px">Read only – Power Controller plans around it but never controls it.</div>`;
+      ? `<div class="socb" style="margin-top:10px"><i style="width:${Math.min(100, pcNum(a.progress))}%"></i></div>` : "";
+    // one-line summary for the collapsed state, like the EV card
+    const sum = [];
+    if (a.program && cls !== "idle") sum.push(pname);
+    if (exp) sum.push(`${pcNum(a.expected_kwh).toFixed(2)} kWh`);
+    sum.push(`${L.kw.toFixed(2)} kW`);
+    return `${this._stripHtml(a)}${prog}<div class="feat">
+      <details class="evd" ${this._detailsOpen() ? "open" : ""}><summary><span>Details</span><em>${pcEsc(sum.join(" · "))}</em></summary>
+      <div class="gv evi" style="margin-top:8px">${rows.map(([k, v]) => `<span>${pcEsc(k)}</span><b>${pcEsc(v)}</b>`).join("")}</div>
+      <div class="hint" style="margin-top:6px">Read only – Power Controller plans around it but never controls it. Program names are set in the panel: Settings → Appliance program registers.</div>
+      </details></div>`;
   }
 
   _forecastText(a, plan) {
@@ -412,11 +453,12 @@ class PowerControllerObjectCard extends HTMLElement {
       } else if (t === "ev_charger") {
         const soc = pcNum(a.soc), tgt = pcNum(this._val("target_soc", a.target_soc)) ?? 80;
         const fin = a.finish_by ? pcHHMM(new Date(a.finish_by)) : "07:00";
-        f = `<div><div class="socb"><i style="width:${soc ?? 0}%"></i><em style="left:${tgt}%"></em></div>
+        f = `${this._evWarnHtml(a)}<div><div class="socb"><i style="width:${soc ?? 0}%"></i><em style="left:${tgt}%"></em></div>
              <div class="sl"><span>${soc === null ? "–" : soc.toFixed(0)} % now</span><span>target ${tgt} %</span></div></div>
              <details class="evd" ${this._detailsOpen() ? "open" : ""}><summary><span>Details</span><em>${pcEsc(this._evSummary(a))}</em></summary>
              <div class="feat">
              ${this._evInfo(a)}
+             ${this._evSensors(a)}
              ${e.car_current_limit ? this._stepper("car_limit", this._val("car_limit", a.car_current_limit_a), "A", "Car current limit", 0) : ""}
              <div class="row2">${e.target_soc ? this._stepper("target_soc", tgt, "%", a.target_soc_source === "car" ? "Car target" : "Target", 0) : ""}
              ${e.finish_by ? `<label class="sel${a.deadline_enabled === false ? " dim" : ""}"><ha-icon icon="mdi:clock-check-outline"></ha-icon><span class="sr">Ready by</span><input type="time" data-act="finish" value="${fin}" aria-label="Ready by" ${a.deadline_enabled === false ? "disabled" : ""}></label>` : ""}</div>
@@ -438,7 +480,10 @@ class PowerControllerObjectCard extends HTMLElement {
   _manualBody(a, ctrl) {
     if (a.device_type === "appliance") return this._applianceBody(a);
     const strip = this._stripHtml(a);
-    if (a.device_type === "ev_charger") return `${strip}<div class="feat"><div class="hint">The charger is not limited by Power Controller while uncommitted.</div></div>`;
+    if (a.device_type === "ev_charger") return `${strip}<div class="feat">${this._evWarnHtml(a)}
+      <details class="evd" ${this._detailsOpen() ? "open" : ""}><summary><span>Details</span><em>${pcEsc(this._evSummary(a))}</em></summary>
+      <div class="feat">${this._evInfo(a)}${this._evSensors(a)}</div></details>
+      <div class="hint">The charger is not limited by Power Controller while uncommitted.</div></div>`;
     if (!ctrl) return `<div class="feat"><div class="hint">Control entity not found.</div></div>`;
     const dom = ctrl.entity_id.split(".")[0];
     const at = ctrl.attributes || {};
@@ -525,6 +570,7 @@ class PowerControllerObjectCard extends HTMLElement {
       el.addEventListener("click", (ev) => {
         ev.stopPropagation();
         if (act === "more") this._moreInfo(this._controlId() || this._config.entity);
+        else if (act === "moreid") this._moreInfo(el.dataset.id);
         else if (act === "commit") this._toggle(e.committed);
         else if (act === "pnow") this._toggle(e.priority_now);
         else if (act === "tog") this._toggle(e[el.dataset.key]);
@@ -653,6 +699,15 @@ class PowerControllerObjectCard extends HTMLElement {
       details.evd .evi{background:transparent;padding:0}
       .evi{margin:0 0 4px;font-size:12.5px;background:var(--soft);border-radius:calc(var(--r) * .7);padding:8px 10px}.evi b{color:var(--ink);font-weight:600;text-align:right}
       .chips{display:flex;gap:6px;flex-wrap:wrap}
+      .evwarn{display:flex;gap:8px;align-items:flex-start;font-size:12.5px;line-height:1.4;padding:8px 10px;border-radius:calc(var(--r) * .7);
+        color:var(--ink);background:color-mix(in srgb, var(--warning-color, #ffa600) 14%, transparent);border:1px solid color-mix(in srgb, var(--warning-color, #ffa600) 45%, transparent);--mdc-icon-size:18px}
+      .evwarn ha-icon{color:var(--warning-color, #ffa600);flex:none}
+      .sensh{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--mut);margin-top:2px}
+      .sensl{display:flex;flex-direction:column}
+      .sens{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;text-align:left;font:inherit;font-size:12.5px;color:var(--ink);
+        background:transparent;border:0;border-top:1px solid var(--divider-color);padding:5px 2px;cursor:pointer}
+      .sens span{min-width:0;color:var(--mut)}.sens small{display:block;font-size:10.5px;font-family:ui-monospace,Consolas,monospace;overflow-wrap:anywhere;opacity:.85}
+      .sens b{font-weight:600;text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}.sens b.bad{color:var(--error-color, #db4437)}
       .chip2{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12px;border-radius:999px;padding:6px 11px;cursor:pointer;border:1px solid var(--divider-color);background:transparent;color:var(--mut);--mdc-icon-size:15px}
       .chip2[aria-pressed=true]{color:var(--c);border-color:color-mix(in srgb, var(--c) 50%, transparent);background:color-mix(in srgb, var(--c) 12%, transparent);font-weight:600}
       .sel.dim{opacity:.5}
