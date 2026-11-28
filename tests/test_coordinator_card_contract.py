@@ -296,3 +296,67 @@ def test_fast_loop_closes_hour_with_its_own_energy(coordinator):
     assert coordinator.energy_this_hour_kwh == pytest.approx(3.0 * 60 / 3600, abs=0.005)
     for t in tasks[1:]:
         t.close()
+
+
+def test_safe_mode_is_held_to_end_of_hour_and_tariff_selector_fixed(coordinator):
+    import asyncio
+    from custom_components.power_controller import coordinator as cmod
+
+    class _St:
+        def __init__(self, s):
+            self.state, self.attributes, self.last_updated = str(s), {"unit_of_measurement": "kW"}, NOW
+    st = {}
+    old_get = coordinator.hass.states.get
+    coordinator.hass.states = type("S", (), {"get": staticmethod(lambda e: st.get(e) or old_get(e))})()
+    coordinator.hub_entry.data["active_power_sensor"] = "sensor.grid"
+    coordinator.hass.async_create_task = lambda c: c.close()
+    coordinator.hass.services = type("Sv", (), {"has_service": lambda *a: False})()
+    coordinator.schedule_save = lambda: None
+    coordinator.committed.update(HP=False, EV=False)
+    clock = {"t": NOW.replace(minute=20)}
+    real_now, real_utc = cmod.dt_util.now, cmod.dt_util.utcnow
+    cmod.dt_util.now = lambda: clock["t"]
+    cmod.dt_util.utcnow = lambda: clock["t"]
+    try:
+        asyncio.run(coordinator._async_update_data())                 # no grid sensor -> safe mode
+        assert coordinator.safe_mode_active and coordinator.limit_now_kw <= 3.0
+        clock["t"] = NOW.replace(minute=30)
+        st["sensor.grid"] = _St(2.0); st["sensor.grid"].last_updated = clock["t"]
+        asyncio.run(coordinator._async_update_data())                 # sensor back -> still safe mode
+        assert coordinator.safe_mode_active and coordinator.safe_mode_sensor_ok
+        clock["t"] = NOW.replace(minute=0) + timedelta(hours=1, seconds=5)
+        st["sensor.grid"].last_updated = clock["t"]
+        asyncio.run(coordinator._async_update_data())                 # new hour -> released
+        assert not coordinator.safe_mode_active
+    finally:
+        cmod.dt_util.now, cmod.dt_util.utcnow = real_now, real_utc
+    pe = coordinator.price_engine
+    pe.set_selected_tariff_kw(5.0)
+    pe.active_tariff_kw = 10.0
+    p = coordinator.overview_payload()
+    assert p["kpi"]["step_locked"] and p["kpi"]["selected_step_kw"] == 5.0
+
+
+def test_ev_status_sensor_and_car_limit(coordinator):
+    class _St:
+        def __init__(self, s, unit=""):
+            self.state, self.attributes, self.last_updated = str(s), {"unit_of_measurement": unit}, NOW
+    st = {"sensor.status": _St("SuspendedEV"), "number.car_limit": _St(10, "A"), "sensor.offered": _St(16, "A"),
+          "sensor.session": _St(4.2, "kWh")}
+    old_get = coordinator.hass.states.get
+    coordinator.hass.states = type("S", (), {"get": staticmethod(lambda e: st.get(e) or old_get(e))})()
+    entry = coordinator.device_entries["EV"]
+    entry.data.update(ev_status_sensor="sensor.status", ev_car_current_limit_entity="number.car_limit",
+                      ev_offered_current_sensor="sensor.offered", ev_session_energy_sensor="sensor.session",
+                      nominal_current_a=32)
+    d = coordinator.device_cfg("EV")
+    assert coordinator.ev_plugged_in(d) and not coordinator.ev_is_charging("EV", d)
+    st["sensor.status"] = _St("Charging")
+    assert coordinator.ev_is_charging("EV", d)
+    st["sensor.status"] = _St("Available")
+    assert not coordinator.ev_plugged_in(d)
+    assert coordinator.ev_max_current_a(d) == 10
+    assert coordinator.device_nominal_kw(d) == pytest.approx(2.3)
+    a = coordinator.device_attributes("EV")
+    assert a["connector_status_text"] == "Not connected" and a["offered_current_a"] == 16
+    assert a["session_energy_kwh"] == 4.2 and a["entities"]["car_current_limit"] == "number.car_limit"

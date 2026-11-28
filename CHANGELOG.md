@@ -1,5 +1,56 @@
 # Changelog
 
+## 2.12.0
+
+### Capacity step selector stays fixed
+- The *Tariff* select is the **desired** step and is never changed by Power Controller. The step
+  in use is internal: the higher of the selection and what the month's top-3 has locked.
+- When they differ, the Capacity-step KPI shows "selected 2–5 kW · in use 5–10 kW (locked by this
+  month's top-3)" in warning colour, and the header shows a *Step locked* pill. Attributes
+  `active_kw` / `locked_by_month` on the select.
+
+### Safe mode
+- Safe mode is held until the end of the clock hour, also when the grid measurement comes back
+  (the energy of the missing period is unknown). Clear indicators: red banner on the Overview
+  (since when, sensor back or not), *SAFE MODE* pill in the header, red tariff-limiter box on the
+  Distribution page; the Warning binary sensor is on during safe mode.
+
+### Hot-water model (new, learning)
+- With a tank temperature sensor **and** a power sensor the water heater learns: standby loss
+  (W/°C, from quiet periods), heat-up rate, and the hourly hot-water use profile for workdays and
+  days off. The planner uses the learned loss and profile instead of the fixed 0.8 %/h and
+  40 % morning / 60 % evening defaults.
+- Settings page: one card per water heater with status, values, the hourly use profile, manual
+  adjustment (loss, daily use; pauses learning), pause/resume and reset. Service
+  `power_controller.hotwater_model`.
+
+### EV charger
+- New optional sensors: *Connector status* (OCPP: Charging, SuspendedEV, SuspendedEVSE,
+  Preparing, Available …), *Current offered to EV*, *Energy this session*. The connector status
+  decides whether the car is plugged in and charging (shown as readable text).
+- New optional *Car's current limiter* (number entity): shown and adjustable on the card (+/−),
+  and the plan and distribution never assume more current than this limit.
+- The card shows connector status, offered current, current set by Power Controller, car limit,
+  power and session energy. Power without a sensor is marked with * (estimated = set current × 230 V).
+
+### Dashboards
+- All panel charts are zoomable: scroll or pinch to zoom the time axis, drag to pan, scroll or drag
+  on the left axis (or Shift+scroll) to stretch the value axis, double-click or *Reset zoom*.
+- Power per device · last hour: fine resolution (step values ~every 5 s plus live samples between
+  history fetches), stacked by plan priority, live value of each device in the legend.
+- Phases · last 24 h: half width next to the power chart; 5-minute means from the recorder
+  statistics (no more "filled band" from fast voltage swings).
+- Energy plan device list sorted by plan priority (1 on top).
+- Live power flow: Baseload and Not controlled at the top of the right half, fed from the Grid box;
+  controlled devices below; uncommitted devices listed separately at the bottom. Arrowheads no
+  longer scale with the line width.
+- Object card: grid lines visible in dark themes.
+
+### Tests
+- 5 new tests (116 total): hot-water learning (loss, profile, heat-up), manual/reset/persistence,
+  planner using the learned profile, safe-mode latch to the end of the hour + fixed selector,
+  EV connector status / car current limit.
+
 ## 2.11.1
 
 ### Capacity step jumped to the top step (bug fix)

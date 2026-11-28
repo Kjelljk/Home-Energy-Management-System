@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.11.1";
+const PC_CARD_VERSION = "2.12.0";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -161,7 +161,7 @@ class PowerControllerObjectCard extends HTMLElement {
     if (t === "ev_charger") {
       const soc = pcNum(a.soc);
       const fin = a.deadline_enabled !== false && a.finish_by ? pcHHMM(new Date(a.finish_by)) : null;
-      return `${soc === null ? "–" : soc.toFixed(0)} % · target ${pcNum(this._val("target_soc", a.target_soc)) ?? "–"} %${fin ? ` by ${fin}` : " · no deadline"}${a.connected === false ? " · unplugged" : ""}`;
+      return `${a.connector_status_text ? `${a.connector_status_text} · ` : ""}${soc === null ? "–" : soc.toFixed(0)} % · target ${pcNum(this._val("target_soc", a.target_soc)) ?? "–"} %${fin ? ` by ${fin}` : " · no deadline"}${a.connected === false && !a.connector_status_text ? " · unplugged" : ""}`;
     }
     if (t === "switch") return `${ctrl ? fmt(ctrl) : "–"} · ${(pcNum(a.live_kw) ?? 0).toFixed(1)} kW`;
     const cur = pcNum(ctrl?.attributes?.current_temperature) ?? pcNum(a.current_temp);
@@ -189,7 +189,7 @@ class PowerControllerObjectCard extends HTMLElement {
     const live = pcNum(a.live_kw) ?? 0, alloc = pcNum(a.allocated_kw) ?? 0, nom = Math.max(0.1, pcNum(a.nominal_kw) ?? 1);
     const kw = key === "manual"
       ? `<span class="kw">${a.has_power_sensor === false ? "no power sensor" : `${live.toFixed(2)} kW measured`}</span>`
-      : (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw">${live.toFixed(2)} / ${alloc.toFixed(1)} kW</span>`;
+      : (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw" title="${a.has_power_sensor === false ? "estimated (no power sensor)" : "measured"} power / power granted by the distribution">${live.toFixed(2)}${a.has_power_sensor === false ? "*" : ""} / ${alloc.toFixed(1)} kW</span>`;
     const meter = key === "manual" || alloc <= 0 ? "" :
       `<div class="meter"><i style="width:${Math.min(100, (alloc / nom) * 100)}%;background:color-mix(in srgb, ${st.color} 30%, transparent)"></i><i style="width:${Math.min(100, (live / nom) * 100)}%;background:${st.color}"></i></div>`;
     return `<div style="--s:${st.color}"><div class="dist${st.pulse ? " pulse" : ""}" role="status"><span class="d"></span><b>${st.label}</b><span class="dt">${this._distDetail({ ...a, ui_status: key })}</span>${kw}</div>${meter}</div>`;
@@ -256,6 +256,17 @@ class PowerControllerObjectCard extends HTMLElement {
       <div class="nxt">${forecast ? this._forecastText(a, plan) : this._nextText(a)}</div></div>`;
   }
 
+  _evInfo(a) {
+    const rows = [];
+    if (a.connector_status_text) rows.push(["Connector", a.connector_status_text]);
+    if (pcNum(a.offered_current_a) !== null) rows.push(["Current offered to car", `${pcNum(a.offered_current_a).toFixed(0)} A`]);
+    if (pcNum(a.commanded_current_a) !== null) rows.push(["Current set by Power Controller", `${pcNum(a.commanded_current_a).toFixed(0)} A`]);
+    if (pcNum(a.car_current_limit_a) !== null) rows.push(["Car current limit", `${pcNum(a.car_current_limit_a).toFixed(0)} A`]);
+    rows.push([a.has_power_sensor === false ? "Power (estimated)" : "Power", `${(pcNum(a.live_kw) ?? 0).toFixed(2)} kW`]);
+    if (pcNum(a.session_energy_kwh) !== null) rows.push(["Energy this session", `${pcNum(a.session_energy_kwh).toFixed(2)} kWh`]);
+    return `<div class="gv evi">${rows.map(([k, v]) => `<span>${pcEsc(k)}</span><b>${pcEsc(v)}</b>`).join("")}</div>`;
+  }
+
   _forecastText(a, plan) {
     const tot = plan.reduce((x, y) => x + y, 0);
     return `Not controlled · expected <b>${tot.toFixed(1)} kWh</b> next 24 h (counted in the plan, never shifted)`;
@@ -309,6 +320,8 @@ class PowerControllerObjectCard extends HTMLElement {
         const fin = a.finish_by ? pcHHMM(new Date(a.finish_by)) : "07:00";
         f = `<div><div class="socb"><i style="width:${soc ?? 0}%"></i><em style="left:${tgt}%"></em></div>
              <div class="sl"><span>${soc === null ? "–" : soc.toFixed(0)} % now</span><span>target ${tgt} %</span></div></div>
+             ${this._evInfo(a)}
+             ${e.car_current_limit ? this._stepper("car_limit", this._val("car_limit", a.car_current_limit_a), "A", "Car current limit", 0) : ""}
              <div class="row2">${e.target_soc ? this._stepper("target_soc", tgt, "%", a.target_soc_source === "car" ? "Car target" : "Target", 0) : ""}
              ${e.finish_by ? `<label class="sel${a.deadline_enabled === false ? " dim" : ""}"><ha-icon icon="mdi:clock-check-outline"></ha-icon><span class="sr">Ready by</span><input type="time" data-act="finish" value="${fin}" aria-label="Ready by" ${a.deadline_enabled === false ? "disabled" : ""}></label>` : ""}</div>
              <div class="chips">${e.deadline_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="deadline_enabled" aria-pressed="${a.deadline_enabled !== false}"><ha-icon icon="mdi:clock-end"></ha-icon>${a.deadline_enabled !== false ? "Deadline on" : "No deadline"}</button>` : ""}
@@ -423,6 +436,7 @@ class PowerControllerObjectCard extends HTMLElement {
 
   _onStep(key, d, a, ctrl) {
     const e = this._ents();
+    if (key === "car_limit") { const l = this._numLimits(e.car_current_limit, 6, 32, 1); this._step(key, a.car_current_limit_a, d, l.min, l.max, Math.max(1, l.step), (v) => this._setNumber(e.car_current_limit, v)); return; }
     if (key === "comfort") { const l = this._numLimits(e.comfort_temp, 10, 28, 0.5); this._step(key, a.comfort_temp, d, l.min, l.max, l.step, (v) => this._setNumber(e.comfort_temp, v)); }
     else if (key === "eco") { const l = this._numLimits(e.eco_temp, 5, 25, 0.5); this._step(key, a.eco_temp, d, l.min, l.max, l.step, (v) => this._setNumber(e.eco_temp, v)); }
     else if (key === "nominal") { const l = this._numLimits(e.nominal_temp, 40, 80, 1); this._step(key, a.nominal_temp, d, l.min, l.max, l.step, (v) => this._setNumber(e.nominal_temp, v)); }
@@ -497,7 +511,7 @@ class PowerControllerObjectCard extends HTMLElement {
       .ll{display:inline-block;width:12px;border-top:2px solid var(--ink)}
       svg.chart{display:block;width:100%;height:auto;touch-action:pan-y;cursor:crosshair}
       svg.chart .b{fill:var(--c)}svg.chart .b.now{stroke:var(--ink);stroke-width:1}
-      svg.chart .ax{stroke:var(--divider-color)}svg.chart .gl{stroke:var(--divider-color);stroke-dasharray:2 3}
+      svg.chart .ax{stroke:color-mix(in srgb, var(--primary-text-color) 35%, transparent)}svg.chart .gl{stroke:color-mix(in srgb, var(--primary-text-color) 25%, transparent);stroke-dasharray:2 3}
       svg.chart .tl{fill:var(--mut);font-size:8.5px}
       svg.chart .spl{fill:none;stroke:var(--ink);stroke-width:1.4;vector-effect:non-scaling-stroke}
       svg.chart .cur{stroke:var(--ink);stroke-width:1;vector-effect:non-scaling-stroke}
@@ -531,6 +545,7 @@ class PowerControllerObjectCard extends HTMLElement {
       .socb i{position:absolute;top:0;bottom:0;left:0;background:var(--c);border-radius:6px}
       .socb em{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ink)}
       .warn{padding:8px;color:var(--error-color);font-size:13px}
+      .evi{margin:0 0 4px;font-size:12.5px;background:var(--soft);border-radius:calc(var(--r) * .7);padding:8px 10px}.evi b{color:var(--ink);font-weight:600;text-align:right}
       .chips{display:flex;gap:6px;flex-wrap:wrap}
       .chip2{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12px;border-radius:999px;padding:6px 11px;cursor:pointer;border:1px solid var(--divider-color);background:transparent;color:var(--mut);--mdc-icon-size:15px}
       .chip2[aria-pressed=true]{color:var(--c);border-color:color-mix(in srgb, var(--c) 50%, transparent);background:color-mix(in srgb, var(--c) 12%, transparent);font-weight:600}

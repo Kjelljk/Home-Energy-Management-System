@@ -78,7 +78,11 @@
           "ev_conn_id": "OCPP Connector ID",
           "comfort_during": "Comfort temperature during",
           "heater_kind": "Heater type",
-          "ev_target_soc_entity": "Car's target SoC (number entity, optional – used as charge target)"
+          "ev_target_soc_entity": "Car's target SoC (number entity, optional – used as charge target)",
+          "ev_status_sensor": "Connector status sensor (optional – Charging, SuspendedEV, …)",
+          "ev_offered_current_sensor": "Current offered to EV [A] (optional)",
+          "ev_session_energy_sensor": "Energy this session [kWh] (optional)",
+          "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)"
         }
       }
     }
@@ -126,7 +130,11 @@
           "window_sensor": "Window/Door sensor (optional – pauses thermal learning when open)",
           "comfort_during": "Comfort temperature during",
           "heater_kind": "Heater type",
-          "ev_target_soc_entity": "Car's target SoC (number entity, optional – used as charge target)"
+          "ev_target_soc_entity": "Car's target SoC (number entity, optional – used as charge target)",
+          "ev_status_sensor": "Connector status sensor (optional – Charging, SuspendedEV, …)",
+          "ev_offered_current_sensor": "Current offered to EV [A] (optional)",
+          "ev_session_energy_sensor": "Energy this session [kWh] (optional)",
+          "ev_car_current_limit_entity": "Car's current limiter [A] (number entity, optional)"
         }
       },
       "hub_settings": {
