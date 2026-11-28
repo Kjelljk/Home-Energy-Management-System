@@ -33,6 +33,7 @@ from .const import (
     CONF_EV_OFFERED_SENSOR,
     CONF_EV_SESSION_ENERGY_SENSOR,
     CONF_EV_CAR_LIMIT_ENTITY,
+    CONF_EV_CURRENT_SENSOR,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
     CONF_HOUR_ENERGY_SENSOR,
@@ -279,6 +280,7 @@ def _device_schema(
                 _opt(CONF_EV_STATUS_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
                 _opt(CONF_EV_OFFERED_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
                 _opt(CONF_EV_SESSION_ENERGY_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                _opt(CONF_EV_CURRENT_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
                 _opt(CONF_EV_CAR_LIMIT_ENTITY, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["number", "input_number"])
                 ),

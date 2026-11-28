@@ -12,7 +12,7 @@
  * Styling: only Home Assistant theme variables – follows the active (custom) theme.
  * No external dependencies.
  */
-const PC_CARD_VERSION = "2.12.0";
+const PC_CARD_VERSION = "2.12.1";
 
 const PC_STATUS = {
   running: { label: "Running", color: "var(--success-color, #43a047)", pulse: true },
@@ -92,6 +92,36 @@ class PowerControllerObjectCard extends HTMLElement {
   }
 
   _val(key, fallback) { return key in this._pending ? this._pending[key] : fallback; }
+
+  /* live values read DIRECTLY from Home Assistant states (update the moment they change in HA);
+     the plan-sensor attributes are only the fallback */
+  _num(id, toKw = false) {
+    const st = id && this._hass.states[id];
+    if (!st || ["unknown", "unavailable", ""].includes(st.state)) return null;
+    const v = pcNum(st.state); if (v === null) return null;
+    if (!toKw) return v;
+    const u = String(st.attributes?.unit_of_measurement || "").trim();
+    return v * ({ W: 0.001, MW: 1000 }[u] || 1);
+  }
+
+  /* {kw, src}: src = measured | measured_current | offered_current | commanded | assumed | off */
+  _live(a) {
+    const e = this._ents();
+    const p = this._num(e.power, true);
+    if (p !== null) return { kw: Math.max(0, p), src: "measured" };
+    if (a.device_type === "ev_charger" && a.power_source !== "off") {
+      const ic = this._num(e.charging_current);
+      if (ic !== null) return { kw: Math.max(0, ic) * 0.23, src: "measured_current" };
+      const io = this._num(e.offered_current);
+      if (io !== null) return { kw: Math.max(0, io) * 0.23, src: "offered_current" };
+    }
+    return { kw: pcNum(a.live_kw) ?? 0, src: a.power_source || (a.has_power_sensor ? "measured" : "assumed") };
+  }
+
+  _srcText(src) {
+    return { measured: "measured", measured_current: "from measured current", offered_current: "estimated from offered current",
+      commanded: "estimated from the current Power Controller set", assumed: "assumed (no power sensor)", off: "off" }[src] || src;
+  }
 
   // ------------------------------------------------------------------ actions
   _call(domain, service, data) {
@@ -186,10 +216,11 @@ class PowerControllerObjectCard extends HTMLElement {
     if (!this._config.show_distribution) return "";
     const key = a.committed ? (a.ui_status || "waiting") : "manual";
     const st = PC_STATUS[key] || PC_STATUS.waiting;
-    const live = pcNum(a.live_kw) ?? 0, alloc = pcNum(a.allocated_kw) ?? 0, nom = Math.max(0.1, pcNum(a.nominal_kw) ?? 1);
+    const L = this._live(a), live = L.kw, est = !["measured", "measured_current", "off"].includes(L.src);
+    const alloc = pcNum(a.allocated_kw) ?? 0, nom = Math.max(0.1, pcNum(a.nominal_kw) ?? 1);
     const kw = key === "manual"
-      ? `<span class="kw">${a.has_power_sensor === false ? "no power sensor" : `${live.toFixed(2)} kW measured`}</span>`
-      : (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw" title="${a.has_power_sensor === false ? "estimated (no power sensor)" : "measured"} power / power granted by the distribution">${live.toFixed(2)}${a.has_power_sensor === false ? "*" : ""} / ${alloc.toFixed(1)} kW</span>`;
+      ? `<span class="kw">${L.src === "measured" ? `${live.toFixed(2)} kW measured` : "no power sensor"}</span>`
+      : (alloc <= 0 && live <= 0.01) ? "" : `<span class="kw" title="Power now (${this._srcText(L.src)}) / power granted by the distribution">${live.toFixed(2)}${est ? "*" : ""} / ${alloc.toFixed(1)} kW</span>`;
     const meter = key === "manual" || alloc <= 0 ? "" :
       `<div class="meter"><i style="width:${Math.min(100, (alloc / nom) * 100)}%;background:color-mix(in srgb, ${st.color} 30%, transparent)"></i><i style="width:${Math.min(100, (live / nom) * 100)}%;background:${st.color}"></i></div>`;
     return `<div style="--s:${st.color}"><div class="dist${st.pulse ? " pulse" : ""}" role="status"><span class="d"></span><b>${st.label}</b><span class="dt">${this._distDetail({ ...a, ui_status: key })}</span>${kw}</div>${meter}</div>`;
@@ -256,16 +287,36 @@ class PowerControllerObjectCard extends HTMLElement {
       <div class="nxt">${forecast ? this._forecastText(a, plan) : this._nextText(a)}</div></div>`;
   }
 
-  _evInfo(a) {
-    const rows = [];
-    if (a.connector_status_text) rows.push(["Connector", a.connector_status_text]);
-    if (pcNum(a.offered_current_a) !== null) rows.push(["Current offered to car", `${pcNum(a.offered_current_a).toFixed(0)} A`]);
-    if (pcNum(a.commanded_current_a) !== null) rows.push(["Current set by Power Controller", `${pcNum(a.commanded_current_a).toFixed(0)} A`]);
-    if (pcNum(a.car_current_limit_a) !== null) rows.push(["Car current limit", `${pcNum(a.car_current_limit_a).toFixed(0)} A`]);
-    rows.push([a.has_power_sensor === false ? "Power (estimated)" : "Power", `${(pcNum(a.live_kw) ?? 0).toFixed(2)} kW`]);
-    if (pcNum(a.session_energy_kwh) !== null) rows.push(["Energy this session", `${pcNum(a.session_energy_kwh).toFixed(2)} kWh`]);
-    return `<div class="gv evi">${rows.map(([k, v]) => `<span>${pcEsc(k)}</span><b>${pcEsc(v)}</b>`).join("")}</div>`;
+  _evLive(a) {
+    const e = this._ents(), st = e.connector_status && this._hass.states[e.connector_status];
+    const status = st && !["unknown", "unavailable"].includes(st.state) ? (a.connector_status === st.state ? a.connector_status_text : pcTitle(st.state)) : a.connector_status_text;
+    return { status, ic: this._num(e.charging_current), io: this._num(e.offered_current) ?? pcNum(a.offered_current_a),
+      session: this._num(e.session_energy) ?? pcNum(a.session_energy_kwh), limit: this._num(e.car_current_limit) ?? pcNum(a.car_current_limit_a) };
   }
+
+  _evSummary(a) {
+    const v = this._evLive(a), L = this._live(a), parts = [];
+    if (v.status) parts.push(v.status);
+    const amps = v.ic ?? v.io;
+    if (amps !== null) parts.push(`${amps.toFixed(1)} A`);
+    parts.push(`${L.kw.toFixed(2)} kW${["measured", "measured_current", "off"].includes(L.src) ? "" : "*"}`);
+    if (v.session !== null) parts.push(`${v.session.toFixed(2)} kWh`);
+    return parts.join(" · ");
+  }
+
+  _evInfo(a) {
+    const v = this._evLive(a), L = this._live(a), rows = [];
+    if (v.status) rows.push(["Connector", v.status]);
+    if (v.ic !== null) rows.push(["Charging current (measured)", `${v.ic.toFixed(1)} A`]);
+    if (v.io !== null) rows.push(["Current offered to car", `${v.io.toFixed(0)} A`]);
+    if (pcNum(a.commanded_current_a) !== null) rows.push(["Current set by Power Controller", `${pcNum(a.commanded_current_a).toFixed(0)} A`]);
+    if (v.limit !== null) rows.push(["Car current limit", `${v.limit.toFixed(0)} A`]);
+    rows.push([`Power (${this._srcText(L.src)})`, `${L.kw.toFixed(2)} kW`]);
+    if (v.session !== null) rows.push(["Energy this session", `${v.session.toFixed(2)} kWh`]);
+    return `<div class="gv evi">${rows.map(([k, val]) => `<span>${pcEsc(k)}</span><b>${pcEsc(val)}</b>`).join("")}</div>`;
+  }
+
+  _detailsOpen() { try { return localStorage.getItem(`pc-card-details:${this._config.entity}`) === "1"; } catch (_) { return false; } }
 
   _forecastText(a, plan) {
     const tot = plan.reduce((x, y) => x + y, 0);
@@ -320,12 +371,15 @@ class PowerControllerObjectCard extends HTMLElement {
         const fin = a.finish_by ? pcHHMM(new Date(a.finish_by)) : "07:00";
         f = `<div><div class="socb"><i style="width:${soc ?? 0}%"></i><em style="left:${tgt}%"></em></div>
              <div class="sl"><span>${soc === null ? "–" : soc.toFixed(0)} % now</span><span>target ${tgt} %</span></div></div>
+             <details class="evd" ${this._detailsOpen() ? "open" : ""}><summary><span>Details</span><em>${pcEsc(this._evSummary(a))}</em></summary>
+             <div class="feat">
              ${this._evInfo(a)}
              ${e.car_current_limit ? this._stepper("car_limit", this._val("car_limit", a.car_current_limit_a), "A", "Car current limit", 0) : ""}
              <div class="row2">${e.target_soc ? this._stepper("target_soc", tgt, "%", a.target_soc_source === "car" ? "Car target" : "Target", 0) : ""}
              ${e.finish_by ? `<label class="sel${a.deadline_enabled === false ? " dim" : ""}"><ha-icon icon="mdi:clock-check-outline"></ha-icon><span class="sr">Ready by</span><input type="time" data-act="finish" value="${fin}" aria-label="Ready by" ${a.deadline_enabled === false ? "disabled" : ""}></label>` : ""}</div>
              <div class="chips">${e.deadline_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="deadline_enabled" aria-pressed="${a.deadline_enabled !== false}"><ha-icon icon="mdi:clock-end"></ha-icon>${a.deadline_enabled !== false ? "Deadline on" : "No deadline"}</button>` : ""}
-             ${e.min_soc_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="min_soc_enabled" aria-pressed="${!!a.min_soc_enabled}"><ha-icon icon="mdi:battery-clock-outline"></ha-icon>Min ${pcNum(a.min_soc) ?? 30} %${a.min_soc_enabled && a.min_soc_deadline ? ` by ${new Date(a.min_soc_deadline).toLocaleDateString(undefined, { weekday: "short" })} ${pcHHMM(new Date(a.min_soc_deadline))}` : a.min_soc_enabled ? " within 24 h" : " off"}</button>` : ""}</div>`;
+             ${e.min_soc_enabled ? `<button type="button" class="chip2" data-act="tog" data-key="min_soc_enabled" aria-pressed="${!!a.min_soc_enabled}"><ha-icon icon="mdi:battery-clock-outline"></ha-icon>Min ${pcNum(a.min_soc) ?? 30} %${a.min_soc_enabled && a.min_soc_deadline ? ` by ${new Date(a.min_soc_deadline).toLocaleDateString(undefined, { weekday: "short" })} ${pcHHMM(new Date(a.min_soc_deadline))}` : a.min_soc_enabled ? " within 24 h" : " off"}</button>` : ""}</div>
+             </div></details>`;
       }
     }
     const hold = pcNum(a.hold_remaining_s) ?? 0;
@@ -397,6 +451,8 @@ class PowerControllerObjectCard extends HTMLElement {
       try { root.querySelector(sel)?.focus(); } catch (_) { /* ignore */ }
     }
     this._bind();
+    const evd = root.querySelector("details.evd");
+    if (evd) evd.addEventListener("toggle", () => { try { localStorage.setItem(`pc-card-details:${this._config.entity}`, evd.open ? "1" : "0"); } catch (_) { /* */ } });
     const det = root.querySelector("details.gov");
     if (det) det.addEventListener("toggle", () => { this._govOpen = det.open; });
   }
@@ -545,6 +601,12 @@ class PowerControllerObjectCard extends HTMLElement {
       .socb i{position:absolute;top:0;bottom:0;left:0;background:var(--c);border-radius:6px}
       .socb em{position:absolute;top:-2px;bottom:-2px;width:2px;background:var(--ink)}
       .warn{padding:8px;color:var(--error-color);font-size:13px}
+      details.evd{background:var(--soft);border-radius:calc(var(--r) * .7);padding:7px 10px;font-size:12.5px}
+      details.evd summary{cursor:pointer;display:flex;gap:8px;align-items:baseline;list-style:none;color:var(--ink);font-weight:600}
+      details.evd summary::-webkit-details-marker{display:none}
+      details.evd summary::before{content:"▸";color:var(--mut);transition:transform .15s}details.evd[open] summary::before{transform:rotate(90deg)}
+      details.evd summary em{font-style:normal;font-weight:400;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1;text-align:right;font-variant-numeric:tabular-nums}
+      details.evd .evi{background:transparent;padding:0}
       .evi{margin:0 0 4px;font-size:12.5px;background:var(--soft);border-radius:calc(var(--r) * .7);padding:8px 10px}.evi b{color:var(--ink);font-weight:600;text-align:right}
       .chips{display:flex;gap:6px;flex-wrap:wrap}
       .chip2{display:inline-flex;align-items:center;gap:6px;font:inherit;font-size:12px;border-radius:999px;padding:6px 11px;cursor:pointer;border:1px solid var(--divider-color);background:transparent;color:var(--mut);--mdc-icon-size:15px}

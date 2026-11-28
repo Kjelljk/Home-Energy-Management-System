@@ -49,6 +49,7 @@ from .const import (
     CONF_EV_OFFERED_SENSOR,
     CONF_EV_SESSION_ENERGY_SENSOR,
     CONF_EV_CAR_LIMIT_ENTITY,
+    CONF_EV_CURRENT_SENSOR,
     EV_STATUS_TEXT,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
@@ -559,7 +560,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         state = self.hass.states.get(entity_id)
         if state is None or state.state in ("unknown", "unavailable", "none", ""):
             return None
-        if max_age_s is not None and (dt_util.utcnow() - state.last_updated).total_seconds() > max_age_s:
+        if max_age_s is not None and (dt_util.utcnow() - self._last_seen(state)).total_seconds() > max_age_s:
             return None
         try:
             val = float(state.state)
@@ -568,6 +569,13 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         unit = str(state.attributes.get("unit_of_measurement", "")).strip()
         factor = {"W": 0.001, "MW": 1000.0, "Wh": 0.001, "MWh": 1000.0, "mA": 0.001}.get(unit, 1.0)
         return val * factor
+
+    @staticmethod
+    def _last_seen(state) -> datetime:
+        """When the source last REPORTED a value. HA only moves ``last_updated`` when the value
+        changes; ``last_reported`` (HA 2024.3+) also moves when the same value is reported again.
+        Using last_updated made stable readings (e.g. an EV at a steady 1.73 kW) look stale."""
+        return getattr(state, "last_reported", None) or state.last_updated
 
     def _state_on(self, entity_id: str | None) -> bool | None:
         if not entity_id:
@@ -585,26 +593,41 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         return {**entry.data, **entry.options}
 
     def get_device_live_power_kw(self, entry_id: str) -> float:
-        """Live power; falls back to nominal power if the device is commanded on and has no sensor."""
+        return self.device_power(entry_id)[0]
+
+    def device_power(self, entry_id: str) -> tuple[float, str]:
+        """(live kW, source). Sources: ``measured`` (power sensor), ``measured_current`` (EV current
+        sensor × 230 V), ``offered_current`` (current offered to the EV × 230 V), ``commanded``
+        (current Power Controller sent × 230 V), ``assumed`` (nominal / granted), ``off``.
+
+        Device power sensors have NO staleness gate: a value is valid until the sensor becomes
+        unavailable (many integrations only report on change). Only the grid meter is gated."""
         d = self.device_cfg(entry_id)
-        live = self._read_float(d.get(CONF_POWER_SENSOR), max_age_s=self._timeout())
+        live = self._read_float(d.get(CONF_POWER_SENSOR))
         if live is not None:
-            return max(0.0, live)
+            return max(0.0, live), "measured"
         if d.get(CONF_DEVICE_TYPE) == DeviceType.EV_CHARGER:
-            # no power sensor: only count power while the charge switch is on, at the current
-            # that was actually commanded (never the nominal power of a charger that is off)
-            sw = self.hass.states.get(d.get(CONF_EV_CHARGE_SWITCH)) if d.get(CONF_EV_CHARGE_SWITCH) else None
-            if sw is None or sw.state != "on":
-                return 0.0
-            return round(float(self._last_ev_target_a.get(entry_id, 0)) * 230.0 / 1000.0, 3)
+            charging = None
+            raw, _ = self.ev_status(d)
+            if raw is not None:
+                info = EV_STATUS_TEXT.get(raw.replace(" ", "").replace("_", "").lower())
+                charging = info[1] if info else None
+            if charging is None:
+                sw = self.hass.states.get(d.get(CONF_EV_CHARGE_SWITCH)) if d.get(CONF_EV_CHARGE_SWITCH) else None
+                charging = bool(sw and sw.state == "on")
+            if not charging:
+                return 0.0, "off"
+            for key, src in ((CONF_EV_CURRENT_SENSOR, "measured_current"), (CONF_EV_OFFERED_SENSOR, "offered_current")):
+                a = self._read_float(d.get(key))
+                if a is not None:
+                    return round(max(0.0, a) * 230.0 / 1000.0, 3), src
+            return round(float(self._last_ev_target_a.get(entry_id, 0)) * 230.0 / 1000.0, 3), "commanded"
         alloc = self.allocations.get(entry_id)
         if alloc and alloc.allowed_kw > 0 and alloc.status != DistStatus.REDISTRIBUTING:
-            # without a power sensor: on/off devices are assumed at full power, stepless
-            # devices at the power they were granted
             if d.get(CONF_HEATER_KIND) == "stepless":
-                return float(alloc.allowed_kw)
-            return float((d.get(CONF_NOMINAL_POWER_KW) or 0.0))
-        return 0.0
+                return float(alloc.allowed_kw), "assumed"
+            return float((d.get(CONF_NOMINAL_POWER_KW) or 0.0)), "assumed"
+        return 0.0, "off"
 
     async def _safe_call(self, domain: str, service: str, data: dict[str, Any], blocking: bool = False) -> bool:
         """Service call that never takes the control loop down. ``blocking`` waits for the
@@ -1374,7 +1397,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         hs_state = self.hass.states.get(hs_id) if hs_id else None
         hs_val = self._read_float(hs_id) if hs_id else None
         closed = self.hour_meter.update(now, active_kw if grid_valid else None, hs_val,
-                                        dt_util.as_local(hs_state.last_updated) if hs_state is not None else None)
+                                        dt_util.as_local(self._last_seen(hs_state)) if hs_state is not None else None)
         if closed is not None:
             self.energy_this_hour_kwh = closed.kwh
             self._close_shadow_hour(closed.hour_start)
@@ -1940,7 +1963,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         device_id=eid, volume_l=float(d.get(CONF_TANK_VOLUME_L) or 200.0),
                         seed_daily_kwh=float(d.get(CONF_DAILY_QUOTA_HOURS) or 3.0) * nominal * 0.85)
                 tank.volume_l = float(d.get(CONF_TANK_VOLUME_L) or tank.volume_l)
-                tank.update(now, water, self._read_float(d.get(CONF_POWER_SENSOR), max_age_s=self._timeout()),
+                tank.update(now, water, self._read_float(d.get(CONF_POWER_SENSOR)),
                             self.is_workday(now.date()))
             reserved = self.plan_result.legionella_hours.get(eid) or []
             if water is not None:
@@ -2005,6 +2028,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "min_temp": d.get(CONF_MIN_TEMP_ENTITY),
             "room_temp": d.get(CONF_ROOM_TEMP_SENSOR),
             "water_temp": d.get(CONF_WATER_TEMP_SENSOR),
+            "power": d.get(CONF_POWER_SENSOR),
         }
         extra: dict[str, Any] = {}
         if dtype == DeviceType.CLIMATE_HEATING:
@@ -2029,7 +2053,8 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             car_current_limit=d.get(CONF_EV_CAR_LIMIT_ENTITY),
                             connector_status=d.get(CONF_EV_STATUS_SENSOR),
                             offered_current=d.get(CONF_EV_OFFERED_SENSOR),
-                            session_energy=d.get(CONF_EV_SESSION_ENERGY_SENSOR))
+                            session_energy=d.get(CONF_EV_SESSION_ENERGY_SENSOR),
+                            charging_current=d.get(CONF_EV_CURRENT_SENSOR))
             extra = {"soc": cfg_value(CONF_EV_SOC_SENSOR), "target_soc": self.ev_target_soc(eid),
                      "target_soc_source": "car" if d.get(CONF_EV_TARGET_SOC_ENTITY) else "power_controller",
                      "transaction_id": self.ev_transaction_id(d),
@@ -2048,6 +2073,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                      "connector_status": self.ev_status(d)[0],
                      "connector_status_text": self.ev_status(d)[1],
                      "offered_current_a": cfg_value(CONF_EV_OFFERED_SENSOR),
+                     "charging_current_a": cfg_value(CONF_EV_CURRENT_SENSOR),
                      "session_energy_kwh": cfg_value(CONF_EV_SESSION_ENERGY_SENSOR),
                      "car_current_limit_a": cfg_value(CONF_EV_CAR_LIMIT_ENTITY),
                      "max_current_a": self.ev_max_current_a(d),
@@ -2085,6 +2111,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                        self.plan_slots.setpoints.get(eid) if self.plans_15m.get(eid) else setpoints,
                                        self.plan_start, now, 1.0 / max(1, self.plan_spp) if self.plans_15m.get(eid) else 1.0),
             "has_power_sensor": bool(d.get(CONF_POWER_SENSOR)),
+            "power_source": self.device_power(eid)[1],
             "plan_start": self.plan_start.isoformat() if self.plan_start else None,
             "plan_15m_24h": (self.plans_15m.get(eid) or [])[self.slot_idx(now) - self.slot_idx(now) % self.plan_spp:][:24 * self.plan_spp],
             "slots_per_hour": self.plan_spp,
@@ -2265,7 +2292,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "ui_status", "live_kw", "allocated_kw", "lent_kw", "nominal_kw", "phase_pair", "next_action", "hold_remaining_s",
                 "current_temp", "comfort_temp", "eco_temp", "nominal_temp", "soc", "target_soc", "finish_by",
                 "runtime_required_h", "runtime_today_h", "energy_today_kwh", "entities", "forecast_only",
-                "governor", "governor_enabled", "dist_status", "dist_reason", "has_power_sensor")})
+                "governor", "governor_enabled", "dist_status", "dist_reason", "has_power_sensor", "power_source")})
             devices[-1]["plan_72h"] = self.plans_72h.get(eid)
             devices[-1]["heater_kind"] = a.get("heater_kind")
             devices[-1]["deadline_enabled"] = a.get("deadline_enabled")

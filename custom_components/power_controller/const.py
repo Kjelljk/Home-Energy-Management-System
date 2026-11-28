@@ -12,7 +12,7 @@ except ImportError:
 
 DOMAIN = "power_controller"
 
-VERSION = "2.12.0"  # keep in sync with manifest.json (used for frontend cache busting)
+VERSION = "2.12.1"  # keep in sync with manifest.json (used for frontend cache busting)
 
 
 PLATFORMS: list[str] = [
@@ -185,6 +185,7 @@ CONF_EV_STATUS_SENSOR = "ev_status_sensor"                 # OCPP connector stat
 CONF_EV_OFFERED_SENSOR = "ev_offered_current_sensor"       # current offered to the EV [A]
 CONF_EV_SESSION_ENERGY_SENSOR = "ev_session_energy_sensor" # energy this session [kWh]
 CONF_EV_CAR_LIMIT_ENTITY = "ev_car_current_limit_entity"   # car-side ampere limiter (number/input_number)
+CONF_EV_CURRENT_SENSOR = "ev_current_sensor"               # measured charging current [A] (OCPP current import)
 
 # OCPP connector status -> readable text and whether energy flows / the car is plugged in
 EV_STATUS_TEXT: dict[str, tuple[str, bool, bool]] = {
