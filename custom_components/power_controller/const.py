@@ -12,7 +12,7 @@ except ImportError:
 
 DOMAIN = "power_controller"
 
-VERSION = "2.11.1"  # keep in sync with manifest.json (used for frontend cache busting)
+VERSION = "2.12.0"  # keep in sync with manifest.json (used for frontend cache busting)
 
 
 PLATFORMS: list[str] = [
@@ -180,7 +180,25 @@ HEATER_ON_OFF = "on_off"             # full power or nothing (panel heater, cabl
 CONF_EV_AVAILABILITY_SWITCH = "ev_availability_switch"
 CONF_EV_CHARGE_SWITCH = "ev_charge_switch"
 CONF_EV_TRANSACTION_SENSOR = "ev_transaction_sensor"
-CONF_EV_TARGET_SOC_ENTITY = "ev_target_soc_entity"   # the car's own charge limit (number/input_number)
+CONF_EV_TARGET_SOC_ENTITY = "ev_target_soc_entity"
+CONF_EV_STATUS_SENSOR = "ev_status_sensor"                 # OCPP connector status (Charging, SuspendedEV, …)
+CONF_EV_OFFERED_SENSOR = "ev_offered_current_sensor"       # current offered to the EV [A]
+CONF_EV_SESSION_ENERGY_SENSOR = "ev_session_energy_sensor" # energy this session [kWh]
+CONF_EV_CAR_LIMIT_ENTITY = "ev_car_current_limit_entity"   # car-side ampere limiter (number/input_number)
+
+# OCPP connector status -> readable text and whether energy flows / the car is plugged in
+EV_STATUS_TEXT: dict[str, tuple[str, bool, bool]] = {
+    # key (lower case): (text, charging, plugged in)
+    "available": ("Not connected", False, False),
+    "preparing": ("Connected – waiting to start", False, True),
+    "charging": ("Charging", True, True),
+    "suspendedev": ("Paused by the car", False, True),
+    "suspendedevse": ("Paused by the charger", False, True),
+    "finishing": ("Finishing", False, True),
+    "reserved": ("Reserved", False, False),
+    "unavailable": ("Charger unavailable", False, False),
+    "faulted": ("Charger fault", False, False),
+}   # the car's own charge limit (number/input_number)
 CONF_EV_CONNECTED_SENSOR = "ev_connected_sensor"
 CONF_EV_SOC_SENSOR = "ev_soc_sensor"
 CONF_EV_BATTERY_KWH = "ev_battery_kwh"
@@ -208,6 +226,7 @@ SERVICE_RESET_SHADOW = "reset_shadow_evaluation"
 SERVICE_SET_HOME_OFFICE = "set_home_office"
 SERVICE_THERMAL_MODEL = "thermal_model"
 SERVICE_TEST_NOTIFICATION = "test_notification"
+SERVICE_HOTWATER_MODEL = "hotwater_model"
 
 OCCUPANCY_LABELS: dict[str, str] = {
     "home_awake": "Home and awake",

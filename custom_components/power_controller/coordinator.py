@@ -45,6 +45,11 @@ from .const import (
     CONF_EV_MIN_CURRENT_A,
     CONF_EV_SOC_SENSOR,
     CONF_EV_TARGET_SOC_ENTITY,
+    CONF_EV_STATUS_SENSOR,
+    CONF_EV_OFFERED_SENSOR,
+    CONF_EV_SESSION_ENERGY_SENSOR,
+    CONF_EV_CAR_LIMIT_ENTITY,
+    EV_STATUS_TEXT,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
     CONF_HOUR_ENERGY_SENSOR,
@@ -115,6 +120,7 @@ from .card_model import next_action, plan_index, plan_window, ui_status, value_a
 from .energy_meter import ClosedHour, HourEnergyTracker, max_hour_kwh_for_fuse, rebuild_month
 from .notifier import ACTION_IGNORE, ACTION_PRIORITY_NOW, NotifySettings, Notifier, parse_hhmm
 from .occupancy import OCC_SELECT_OPTIONS, OccupancyProfile, apply_selector, effective_state
+from .hotwater_model import HotWaterModel
 from .shadow import ShadowEvaluator
 from .storage import PowerControllerStore
 from .thermodynamics import ThermalZoneModel, seed_thermal_parameters
@@ -151,6 +157,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.distributor = PowerDistributor()
 
         self.zones: dict[str, ThermalZoneModel] = {}
+        self.tanks: dict[str, HotWaterModel] = {}      # learned hot-water tank models per device
         self.zone_cfg: dict[str, dict] = {}            # name, area, insulation, window sensor
         self._zones_without_seed: set[str] = set()
         self.zone_windows: dict[str, str | None] = {}
@@ -197,6 +204,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.energy_projected_kwh: float = 0.0
         self.warning_active: bool = False
         self.safe_mode_active: bool = False
+        self.safe_mode_sensor_ok: bool = True
+        self._safe_mode_hour: str | None = None
+        self._safe_mode_since: datetime | None = None
         self.last_plan_ts: datetime | None = None
         self.plan_start: datetime | None = None   # timestamp of index 0 in plans_72h
         # 15-minute plan (kW per slot) used by the real-time loop; plans_72h is the hourly view
@@ -262,6 +272,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.price_engine.spot_history = dict(saved.get("spot_history", {}))
         self.shadow = ShadowEvaluator.from_dict(saved.get("shadow"))
         self.plan_history = list(saved.get("plan_history", []))[-168:]
+        for tid, tdata in saved.get("hotwater_models", {}).items():
+            try:
+                self.tanks[tid] = HotWaterModel.from_dict(tdata)
+            except Exception:  # noqa: BLE001
+                _LOGGER.warning("Could not restore hot-water model %s", tid)
         for zid, zdata in saved.get("thermal_zones", {}).items():
             self.zones[zid] = ThermalZoneModel.from_dict(zdata)
             if zdata.get("seed_alpha") is None:        # stored before 2.10: seed from config below
@@ -436,6 +451,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         d["active_tariff_kw"] = pe.active_tariff_kw
         d["spot_history"] = pe.spot_history
         d["thermal_zones"] = {zid: z.to_dict() for zid, z in self.zones.items()}
+        d["hotwater_models"] = {tid: m.to_dict() for tid, m in self.tanks.items()}
         d["priorities_plan"] = dict(self.plan_priority)
         d["priorities_dist"] = dict(self.dist_priority)
         d["settings"] = {
@@ -859,8 +875,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         c: dict[str, dict] = {}
         name = lambda eid: self.device_entries[eid].title if eid in self.device_entries else eid  # noqa: E731
         if self.safe_mode_active:
-            c["safe_mode"] = {"message": "The grid power sensor has not updated. Power Controller limits the "
-                              "house to the safe-mode budget until it is back. Check the meter/HAN reader."}
+            c["safe_mode"] = {"message": ("The grid power sensor has not updated. " if not self.safe_mode_sensor_ok else
+                                          "The grid power sensor is back, but safe mode is held to the end of the hour. ")
+                              + "Power Controller limits the house to the safe-mode budget. Check the meter/HAN reader."}
         for eid, ts in list(self._ocpp_rejected.items()):
             if (now - ts).total_seconds() < 1800:
                 c[f"ocpp_rejected:{eid}"] = {"message": f"{name(eid)}: ocpp.set_charge_rate was not accepted. "
@@ -887,7 +904,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                                         f"reports {float(cur):.1f} °C for 15 min. Is it controlled elsewhere?"}
                 else:
                     self._setpoint_mismatch_since.pop(eid, None)
-            if dtype == DeviceType.EV_CHARGER and self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)):
+            if dtype == DeviceType.EV_CHARGER and self.ev_plugged_in(d):
                 unmet = float(self.plan_result.unmet.get(eid) or 0.0)
                 min_unmet = float(self.plan_result.ev_min_unmet.get(eid) or 0.0)
                 if unmet > 0.5 or min_unmet > 0.5:
@@ -1169,7 +1186,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "entry_id": eid,
             "device_type": dtype,
             "phase_pair": d.get(CONF_PHASE_PAIR, PhasePair.L1_L2),
-            "nominal_power_kw": float((d.get(CONF_NOMINAL_POWER_KW) or 1.0)),
+            "nominal_power_kw": self.device_nominal_kw(d),
             "plan_priority": self.plan_priority.get(eid, 5),
             "committed": self.committed.get(eid, False),
             "priority_now": self.priority_now.get(eid, False),
@@ -1204,9 +1221,13 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 energy_done_today_kwh=self._day_energy_kwh.get(eid, 0.0),
                 last_legionella_ts=dt_util.parse_datetime(leg_iso) if leg_iso else None,
             )
+            tank = self.tanks.get(eid)
+            if tank is not None and (tank.samples > 0 or tank.manual):
+                spec.update(tank_loss_fraction=tank.loss_fraction_per_h,
+                            draw_kw_72h=tank.draw_kw_series(dt_util.now(), PLANNING_HORIZON_HOURS, self.is_workday))
         elif dtype == DeviceType.EV_CHARGER:
             avail = self._state_on(d.get(CONF_EV_AVAILABILITY_SWITCH))
-            connected = bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR))) and avail is not False
+            connected = self.ev_plugged_in(d) and avail is not False
             soc = self._read_float(d.get(CONF_EV_SOC_SENSOR))
             cap_kwh = float((d.get(CONF_EV_BATTERY_KWH) or 75.0))
             tgt = self.ev_target_soc(eid)
@@ -1219,7 +1240,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 connected=connected, energy_needed_kwh=need,
                 live_power_kw=self.get_device_live_power_kw(eid),
                 # a session only counts as charging when power actually flows
-                charging=connected and self.get_device_live_power_kw(eid) > 0.5,
+                charging=connected and self.ev_is_charging(eid, d),
                 min_power_kw=float((d.get(CONF_EV_MIN_CURRENT_A) or 6)) * 230.0 / 1000.0,
                 # "no deadline": charge as cheaply as possible within the horizon, sooner is better
                 finish_by=self.finish_by.get(eid) if self.ev_deadline_enabled.get(eid, True) else None,
@@ -1373,7 +1394,21 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         raw_now = self.limiters.calculate_tariff_limit_now_kw(
             self.price_engine.active_tariff_kw, self.energy_this_hour_kwh, minutes, target_kwh=self.hour_allowance_kwh
         )
-        budget_kw, self.safe_mode_active = self.limiters.evaluate_total_budget_kw(grid_valid, raw_now)
+        budget_kw, sensor_bad = self.limiters.evaluate_total_budget_kw(grid_valid, raw_now)
+        # Safe mode is latched until the end of the clock hour: when the grid measurement comes
+        # back mid-hour the energy of the missing period is unknown, so the safe budget is kept.
+        hour_key_now = now.strftime("%Y-%m-%dT%H")
+        if sensor_bad:
+            self._safe_mode_hour = hour_key_now
+            self._safe_mode_since = self._safe_mode_since or now
+        elif self._safe_mode_hour is not None and self._safe_mode_hour != hour_key_now:
+            self._safe_mode_hour = None
+            self._safe_mode_since = None
+        self.safe_mode_active = self._safe_mode_hour is not None
+        self.safe_mode_sensor_ok = not sensor_bad
+        if self.safe_mode_active and not sensor_bad:
+            from .const import SAFE_MODE_MAX_KW
+            budget_kw = min(budget_kw, SAFE_MODE_MAX_KW)
         self.limit_now_kw = budget_kw
 
         self.phase_currents = {
@@ -1398,7 +1433,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "entry_id": eid,
                 "device_type": d[CONF_DEVICE_TYPE],
                 "phase_pair": d.get(CONF_PHASE_PAIR, PhasePair.L1_L2),
-                "nominal_power_kw": float((d.get(CONF_NOMINAL_POWER_KW) or 1.0)),
+                "nominal_power_kw": self.device_nominal_kw(d),
                 "min_current_a": float((d.get(CONF_EV_MIN_CURRENT_A) or 6)),
                 "live_power_kw": self.get_device_live_power_kw(eid),
                 "dist_priority": self.dist_priority.get(eid, 5),
@@ -1435,7 +1470,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             d = self.device_cfg(eid)
             if d.get(CONF_DEVICE_TYPE) != DeviceType.EV_CHARGER:
                 continue
-            connected = bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)))
+            connected = self.ev_plugged_in(d)
             was = self._ev_was_connected.get(eid, False)
             if connected and not was:
                 self.ev_session_start[eid] = now
@@ -1581,6 +1616,39 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             })
         return out
 
+    async def async_hotwater_model(self, device_id: str, action: str, loss_w_per_c: float | None = None,
+                                   daily_kwh: float | None = None, freeze: bool | None = None) -> None:
+        """reset | set | freeze | unfreeze a hot-water tank model (service power_controller.hotwater_model)."""
+        tank = self.tanks.get(device_id)
+        if tank is None:
+            raise ValueError(f"No hot-water model for {device_id} (needs a water temperature and a power sensor)")
+        if action == "reset":
+            tank.reset()
+        elif action == "set":
+            tank.set_manual(loss_w_per_c, daily_kwh, freeze=True if freeze is None else bool(freeze))
+        elif action == "freeze":
+            tank.frozen = True
+        elif action == "unfreeze":
+            tank.frozen = False
+        else:
+            raise ValueError(f"Unknown action {action}")
+        self.schedule_save()
+        await self.async_run_planner()
+        await self.async_request_refresh()
+
+    def hotwater_models_payload(self) -> list[dict]:
+        out = []
+        for eid in self.device_entries:
+            d = self.device_cfg(eid)
+            if d.get(CONF_DEVICE_TYPE) != DeviceType.CLIMATE_HOTWATER:
+                continue
+            tank = self.tanks.get(eid)
+            base = {"device_id": eid, "name": self.device_entries[eid].title,
+                    "water_temp": self._read_float(d.get(CONF_WATER_TEMP_SENSOR)),
+                    "has_temp_sensor": bool(d.get(CONF_WATER_TEMP_SENSOR)), "has_power_sensor": bool(d.get(CONF_POWER_SENSOR))}
+            out.append({**base, **(tank.summary() if tank else {"status": "no_model"})})
+        return out
+
     def command_interval_s(self, eid: str) -> float:
         """Minimum time between two commands to a device. Heaters regulated by an external
         room sensor (PI governor, typically heat pumps) get their own, longer interval to
@@ -1660,7 +1728,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return
         ev_kw = self.get_device_live_power_kw(eid)
         min_a = int((d.get(CONF_EV_MIN_CURRENT_A) or 6))
-        max_a = int((d.get(CONF_NOMINAL_CURRENT_A) or 32))
+        max_a = int(self.ev_max_current_a(d))
         if alloc.allowed_kw <= 0.0:
             target_a = 0
         else:
@@ -1724,6 +1792,50 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                                          self.control.min_interval_s, urgent=self.urgent_now() or pnow,
                                          lower_is_relief=True):
             await self._send_ev_limit(eid, d, target_a, now)
+
+    # ------------------------------------------------------------------ EV status helpers
+    def ev_status(self, d: dict) -> tuple[str | None, str | None]:
+        """(raw OCPP connector status, readable text) or (None, None) without a status sensor."""
+        ent = d.get(CONF_EV_STATUS_SENSOR)
+        st = self.hass.states.get(ent) if ent else None
+        if st is None or st.state in ("unknown", "unavailable", ""):
+            return None, None
+        raw = str(st.state)
+        info = EV_STATUS_TEXT.get(raw.replace(" ", "").replace("_", "").lower())
+        return raw, (info[0] if info else raw.replace("_", " ").capitalize())
+
+    def ev_plugged_in(self, d: dict) -> bool:
+        raw, _ = self.ev_status(d)
+        if raw is not None:
+            info = EV_STATUS_TEXT.get(raw.replace(" ", "").replace("_", "").lower())
+            if info is not None:
+                return info[2]
+        return bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)))
+
+    def ev_is_charging(self, eid: str, d: dict) -> bool:
+        """Connector status decides when configured (Charging = energy flows); otherwise the
+        measured power (> 0.5 kW)."""
+        raw, _ = self.ev_status(d)
+        if raw is not None:
+            info = EV_STATUS_TEXT.get(raw.replace(" ", "").replace("_", "").lower())
+            if info is not None:
+                return info[1]
+        return self.get_device_live_power_kw(eid) > 0.5
+
+    def ev_max_current_a(self, d: dict) -> float:
+        """Charger rating, further limited by the car's own current limiter when configured."""
+        a = float(d.get(CONF_NOMINAL_CURRENT_A) or 32)
+        car = self._read_float(d.get(CONF_EV_CAR_LIMIT_ENTITY))
+        if car is not None and car > 0:
+            a = min(a, car)
+        return a
+
+    def device_nominal_kw(self, d: dict) -> float:
+        """Nominal power; for an EV limited by the car's current limiter (230 V IT pair)."""
+        p = float(d.get(CONF_NOMINAL_POWER_KW) or 1.0)
+        if d.get(CONF_DEVICE_TYPE) == DeviceType.EV_CHARGER and d.get(CONF_EV_CAR_LIMIT_ENTITY):
+            p = min(p, self.ev_max_current_a(d) * 230.0 / 1000.0)
+        return p
 
     def ev_transaction_id(self, d: dict) -> int | None:
         ent = d.get(CONF_EV_TRANSACTION_SENSOR)
@@ -1819,6 +1931,17 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             if d.get(CONF_DEVICE_TYPE) != DeviceType.CLIMATE_HOTWATER:
                 continue
             water = self._read_float(d.get(CONF_WATER_TEMP_SENSOR))
+            # hot-water model learns when the tank has a temperature AND a power sensor
+            if d.get(CONF_WATER_TEMP_SENSOR) and d.get(CONF_POWER_SENSOR):
+                tank = self.tanks.get(eid)
+                if tank is None:
+                    nominal = float(d.get(CONF_NOMINAL_POWER_KW) or 2.0)
+                    tank = self.tanks[eid] = HotWaterModel(
+                        device_id=eid, volume_l=float(d.get(CONF_TANK_VOLUME_L) or 200.0),
+                        seed_daily_kwh=float(d.get(CONF_DAILY_QUOTA_HOURS) or 3.0) * nominal * 0.85)
+                tank.volume_l = float(d.get(CONF_TANK_VOLUME_L) or tank.volume_l)
+                tank.update(now, water, self._read_float(d.get(CONF_POWER_SENSOR), max_age_s=self._timeout()),
+                            self.is_workday(now.date()))
             reserved = self.plan_result.legionella_hours.get(eid) or []
             if water is not None:
                 hot = water >= HOTWATER_LEGIONELLA_C
@@ -1902,7 +2025,11 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             deadline_enabled=self.own_entity_id("switch", f"{eid}_deadline_enabled"),
                             min_soc_enabled=self.own_entity_id("switch", f"{eid}_min_soc_enabled"),
                             min_soc=self.own_entity_id("number", f"{eid}_min_soc"),
-                            soc=d.get(CONF_EV_SOC_SENSOR), connected=d.get(CONF_EV_CONNECTED_SENSOR))
+                            soc=d.get(CONF_EV_SOC_SENSOR), connected=d.get(CONF_EV_CONNECTED_SENSOR),
+                            car_current_limit=d.get(CONF_EV_CAR_LIMIT_ENTITY),
+                            connector_status=d.get(CONF_EV_STATUS_SENSOR),
+                            offered_current=d.get(CONF_EV_OFFERED_SENSOR),
+                            session_energy=d.get(CONF_EV_SESSION_ENERGY_SENSOR))
             extra = {"soc": cfg_value(CONF_EV_SOC_SENSOR), "target_soc": self.ev_target_soc(eid),
                      "target_soc_source": "car" if d.get(CONF_EV_TARGET_SOC_ENTITY) else "power_controller",
                      "transaction_id": self.ev_transaction_id(d),
@@ -1916,7 +2043,15 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                      "min_soc_deadline": min_dl.isoformat() if min_dl else None,
                      "min_soc_unmet_kwh": self.plan_result.ev_min_unmet.get(eid),
                      "session_start": self.ev_session_start.get(eid).isoformat() if self.ev_session_start.get(eid) else None,
-                     "connected": bool(self._state_on(d.get(CONF_EV_CONNECTED_SENSOR)))}
+                     "connected": self.ev_plugged_in(d),
+                     "charging": self.ev_is_charging(eid, d),
+                     "connector_status": self.ev_status(d)[0],
+                     "connector_status_text": self.ev_status(d)[1],
+                     "offered_current_a": cfg_value(CONF_EV_OFFERED_SENSOR),
+                     "session_energy_kwh": cfg_value(CONF_EV_SESSION_ENERGY_SENSOR),
+                     "car_current_limit_a": cfg_value(CONF_EV_CAR_LIMIT_ENTITY),
+                     "max_current_a": self.ev_max_current_a(d),
+                     "commanded_current_a": self._last_ev_target_a.get(eid)}
         elif dtype == DeviceType.SWITCH:
             entities.update(runtime_hours=self.own_entity_id("number", f"{eid}_runtime_hours"))
             extra = {"runtime_required_h": self.runtime_hours.get(eid, 2.0),
@@ -2178,6 +2313,7 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             "urgent": self.urgent_now(),
             "settings": self._settings_entities(),
             "thermal_zones": self.thermal_zones_payload(),
+            "hotwater_models": self.hotwater_models_payload(),
             "kpi": {
                 "grid_power_kw": round(self.grid_power_kw, 3),
                 "limit_now_kw": self.limit_now_kw,
@@ -2194,6 +2330,9 @@ class PowerControllerCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 "shadow_benefit_nok": shadow["benefit_nok"] if shadow else None,
                 "warning": self.warning_active,
                 "safe_mode": self.safe_mode_active,
+                "safe_mode_sensor_ok": self.safe_mode_sensor_ok,
+                "safe_mode_since": self._safe_mode_since.isoformat() if self._safe_mode_since else None,
+                "step_locked": pe.active_tariff_kw > pe.selected_tariff_kw,
                 "hour_energy_source": self.hour_energy_source,
                 "p_avg_60m_kw": self.p_avg_60m_kw,
                 "month_source": self.month_source,

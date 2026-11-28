@@ -39,7 +39,7 @@ class HubWarningBinarySensor(CoordinatorEntity[PowerControllerCoordinator], Bina
 
     @property
     def is_on(self) -> bool:
-        return self.coordinator.warning_active
+        return self.coordinator.warning_active or self.coordinator.safe_mode_active
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -47,4 +47,5 @@ class HubWarningBinarySensor(CoordinatorEntity[PowerControllerCoordinator], Bina
         return {
             "overload": self.coordinator.limiters.oa.snapshot(),
             "safe_mode": self.coordinator.safe_mode_active,
+            "safe_mode_sensor_ok": self.coordinator.safe_mode_sensor_ok,
         }

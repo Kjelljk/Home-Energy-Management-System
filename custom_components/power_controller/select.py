@@ -84,16 +84,17 @@ class HubTariffSelect(_HubBaseSelect):
     @property
     def options(self) -> list[str]:
         uppers = self.coordinator.price_engine.capacity_uppers()
-        active = self.coordinator.price_engine.active_tariff_kw
+        sel = self.coordinator.price_engine.selected_tariff_kw
         opts = [_kw_label(u) for u in uppers]
-        if _kw_label(active) not in opts:  # e.g. locked above the last finite step
-            opts.append(_kw_label(active))
+        if _kw_label(sel) not in opts:
+            opts.append(_kw_label(sel))
         return opts
 
     @property
     def current_option(self) -> str:
-        """Shows the ACTIVE step (may be higher than selected if the month's peaks locked it)."""
-        return _kw_label(self.coordinator.price_engine.active_tariff_kw)
+        """The DESIRED step chosen by the user. It is never changed by Power Controller; the step
+        actually in use (max of this and what the month's top-3 has locked) is an attribute."""
+        return _kw_label(self.coordinator.price_engine.selected_tariff_kw)
 
     @property
     def extra_state_attributes(self) -> dict:
@@ -101,6 +102,8 @@ class HubTariffSelect(_HubBaseSelect):
         version = pe.tariff_version()
         return {
             "selected_kw": pe.selected_tariff_kw,
+            "active_kw": pe.active_tariff_kw,
+            "locked_by_month": pe.active_tariff_kw > pe.selected_tariff_kw,
             "locked_kw": pe.locked_tier_kw(),
             "tariff_version": version.name,
             "capacity_charge_this_month_nok": pe.capacity_charge_nok(),

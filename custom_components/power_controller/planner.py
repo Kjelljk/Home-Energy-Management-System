@@ -644,12 +644,19 @@ class EnergyPlanner:
 
         # Tank model: 1 kWh raises the tank by 1/(1.163e-3*V) °C, standby loss to the room.
         alpha = 1.0 / (0.001163 * volume)
-        decay, gain, cout = thermal_coeffs(alpha, 0.008, dt)
+        # learned standby loss (hotwater_model) or the fixed 0.8 %/h default
+        decay, gain, cout = thermal_coeffs(alpha, float(dev.get("tank_loss_fraction") or 0.008), dt)
+        learned_draw = dev.get("draw_kw_72h")
         draw_kw = []
         for t in range(H):
             hr = (now + timedelta(hours=t * dt)).hour
-            share = 0.4 / 3 if 6 <= hr < 9 else (0.6 / 5 if 17 <= hr < 22 else 0.0)
-            draw_kw.append(0.0 if away[t] else daily_use * share)     # kWh per hour == kW
+            if learned_draw:
+                h_idx = int(t * dt)
+                draw = float(learned_draw[h_idx]) if h_idx < len(learned_draw) else float(learned_draw[-1])
+            else:
+                share = 0.4 / 3 if 6 <= hr < 9 else (0.6 / 5 if 17 <= hr < 22 else 0.0)
+                draw = daily_use * share                                  # kWh per hour == kW
+            draw_kw.append(0.0 if away[t] else draw)
         mins = self._hourly_series(dev.get("min_temps_72h"), H, spp, 50.0)
         T = V.add(H, lb=-np.inf)
         s_lo = V.add(H, cost=w * dt)

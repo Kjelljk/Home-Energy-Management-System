@@ -29,6 +29,10 @@ from .const import (
     CONF_EV_MIN_CURRENT_A,
     CONF_EV_SOC_SENSOR,
     CONF_EV_TARGET_SOC_ENTITY,
+    CONF_EV_STATUS_SENSOR,
+    CONF_EV_OFFERED_SENSOR,
+    CONF_EV_SESSION_ENERGY_SENSOR,
+    CONF_EV_CAR_LIMIT_ENTITY,
     CONF_EV_TRANSACTION_SENSOR,
     CONF_EXTERNAL_LIMIT_SENSOR,
     CONF_HOUR_ENERGY_SENSOR,
@@ -270,6 +274,12 @@ def _device_schema(
                     selector.EntitySelectorConfig(domain="sensor")
                 ),
                 _opt(CONF_EV_TARGET_SOC_ENTITY, d): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain=["number", "input_number"])
+                ),
+                _opt(CONF_EV_STATUS_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                _opt(CONF_EV_OFFERED_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                _opt(CONF_EV_SESSION_ENERGY_SENSOR, d): selector.EntitySelector(selector.EntitySelectorConfig(domain="sensor")),
+                _opt(CONF_EV_CAR_LIMIT_ENTITY, d): selector.EntitySelector(
                     selector.EntitySelectorConfig(domain=["number", "input_number"])
                 ),
                 vol.Optional(CONF_EV_CONN_ID, default=_dv(d, CONF_EV_CONN_ID, 1, int)): vol.Coerce(int),
